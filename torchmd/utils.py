@@ -91,3 +91,8 @@ def xyz_writer(input_file, output_file, mol_elements):
                 f.write(f"{mol_elements[j]} ")
                 f.write(" ".join(map(str, npy_traj[j, :, i])))
                 f.write("\n")
+
+HeavyMasses = {"CH3": 15.03452, "CH2": 14.02658, "CH1": 13.01864, "CH0": 12.0107, 
+                "NH3": 17.03052, "NH2": 16.02258, "NH1": 15.01464, "NH0": 14.0067,
+                "OH1": 17.00734, "OH0": 15.994, "SH1": 33.0729, "SH0": 32.065,
+                }

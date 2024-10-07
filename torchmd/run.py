@@ -127,6 +127,12 @@ def get_args(arguments=None):
     parser.add_argument(
         "--npz_file", default=None, type=str, help="Input file.npz with coord and z"
     )
+    parser.add_argument(
+        "--useIncreasedMasses",
+        default=False,
+        help="Use increased masses for heavy atoms, suggested for noHydrogen systems",
+    )
+    parser.add_argument('--resume-dir', default=None, type=str, help='Path to the directory to resume the simulation')
 
     args = parser.parse_args(args=arguments)
     os.makedirs(args.log_dir, exist_ok=True)
@@ -173,7 +179,13 @@ def setup(args, batch_comp=False):
 
     if args.extended_system is not None:
         mol.read(args.extended_system)
-
+        
+    if args.useIncreasedMasses:
+        print("Using Increased Masses for Heavy Atoms")
+        print(f"Initial Molecule Mass: {np.sum(mol.masses)}")
+        mol.masses = np.array([HeavyMasses[el] for el in mol.atomtype]).astype(np.float32)
+        print(f"New Molecule Mass: {np.sum(mol.masses)}")
+        
     precision = precisionmap[args.precision]
 
     print("Force terms: ", args.forceterms)
