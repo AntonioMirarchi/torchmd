@@ -12,12 +12,11 @@ from tqdm import tqdm
 import argparse
 import importlib
 from torchmd.integrator import maxwell_boltzmann
-from torchmd.utils import save_argparse, xyz_writer, LogWriter, LoadFromFile 
 from torchmd.minimizers import minimize_bfgs
 from torchmd.npzmol import npzMolecule
+from torchmd.utils import save_argparse, xyz_writer, LogWriter, LoadFromFile, HeavyMasses, get_init_xtc #, fix_resume_files
 
 FS2NS = 1e-6
-
 
 def viewFrame(mol, pos, forces):
     from ffevaluation.ffevaluate import viewForces
@@ -160,7 +159,8 @@ def setup(args, batch_comp=False):
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     device = torch.device(args.device)
-
+    steps_done = None # for resuming the simulation
+    
     if args.topology is not None:
         mol = Molecule(args.topology)
     elif args.structure is not None:
@@ -179,6 +179,13 @@ def setup(args, batch_comp=False):
 
     if args.extended_system is not None:
         mol.read(args.extended_system)
+
+    if args.resume_dir is not None:
+        print(f"Resuming simulation from {args.resume_dir}")
+        #fix_resume_files(args.resume_dir, n_replicas=args.replicas, output_period=args.output_period)
+        mol, steps_done = get_init_xtc(mol, args.resume_dir)
+        print(f"Resuming from step {steps_done}")
+        print(f"Initial pos shape: {mol.coords.shape}")
         
     if args.useIncreasedMasses:
         print("Using Increased Masses for Heavy Atoms")
@@ -236,10 +243,10 @@ def setup(args, batch_comp=False):
         switch_dist=args.switch_dist,
         exclusions=args.exclusions,
     )
-    return mol, system, forces
+    return mol, system, forces, steps_done
 
 
-def dynamics(args, mol, system, forces):
+def dynamics(args, mol, system, forces, steps_done=None):
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
     device = torch.device(args.device)
@@ -254,18 +261,27 @@ def dynamics(args, mol, system, forces):
     wrapper = Wrapper(mol.numAtoms, mol.bonds if len(mol.bonds) else None, device)
 
     outputname, outputext = os.path.splitext(args.output)
-    trajs = []
     logs = []
+    trajs = []
+    #forces = []
     for k in range(args.replicas):
         logs.append(
             LogWriter(
                 args.log_dir,
                 keys=("iter", "ns", "epot", "ekin", "etot", "T"),
                 name=f"monitor_{k}.csv",
+                append=False if steps_done is None else True,
             )
         )
         trajs.append([])
-
+        #forces.append([])
+        if steps_done is not None:
+            resume_traj = np.load(os.path.join(args.log_dir, f"{outputname}_{k}{outputext}.npy"))
+            #resume_force = np.load(os.path.join(args.log_dir, f"forces_{outputname}_{k}{outputext}.npy"))
+            for frame_i in range(resume_traj.shape[2]):
+                trajs[k].append(list(resume_traj[:, :, frame_i]))
+                #forces.append(list(resume_force[:, :, frame_i]))
+                        
     if args.minimize != None:
         minimize_bfgs(system, forces, steps=args.minimize)
 
@@ -273,18 +289,30 @@ def dynamics(args, mol, system, forces):
     Epot = forces.compute(system.pos, system.box, system.forces)
 
     for i in iterator:
+        if steps_done is not None and i < (steps_done+1):
+            # best way to resume instead of modifying the iterator, the +1 is because we start from 1
+            # we just skip the steps that have been already done, and 'iter' and 'ns' in monitor.csv will be correct
+            continue 
+        
         # viewFrame(mol, system.pos, system.forces)
         Ekin, Epot, T = integrator.step(niter=args.output_period)
         wrapper.wrap(system.pos, system.box)
         currpos = system.pos.detach().cpu().numpy().copy()
+        #currforces = system.forces.detach().cpu().numpy().copy()
+        
         for k in range(args.replicas):
             trajs[k].append(currpos[k])
+            #forces[k].append(currforces[k])
             if (i * args.output_period) % args.save_period == 0:
                 np.save(
                     os.path.join(args.log_dir, f"{outputname}_{k}{outputext}"),
                     np.stack(trajs[k], axis=2),
                 )  # ideally we want to append
-
+                #np.save(
+                #    os.path.join(args.log_dir, f"forces_{outputname}_{k}{outputext}"),
+                #    np.stack(forces[k], axis=2),
+                #)  # ideally we want to append
+            
             logs[k].write_row(
                 {
                     "iter": i * args.output_period,
@@ -302,8 +330,7 @@ def dynamics(args, mol, system, forces):
         xyz_name = os.path.join(args.log_dir, args.output + f"_{k}.xyz")
         xyz_writer(npy_name, xyz_name, mol.element)
 
-
 if __name__ == "__main__":
     args = get_args()
-    mol, system, forces = setup(args)
-    dynamics(args, mol, system, forces)
+    mol, system, forces, steps = setup(args)
+    dynamics(args, mol, system, forces, steps)
