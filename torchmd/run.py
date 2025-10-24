@@ -317,16 +317,17 @@ def dynamics(args, mol, system, forces, steps_done=None):
                 #    np.stack(forces[k], axis=2),
                 #)  # ideally we want to append
             
-            logs[k].write_row(
-                {
-                    "iter": i * args.output_period,
-                    "ns": FS2NS * i * args.output_period * args.timestep,
-                    "epot": Epot[k],
-                    "ekin": Ekin[k],
-                    "etot": Epot[k] + Ekin[k],
-                    "T": T[k],
-                }
-            )
+            update_dict = {
+                "iter": i * args.output_period,
+                "ns": FS2NS * i * args.output_period * args.timestep,
+                "ekin": Ekin[k],
+                "T": T[k],
+            }
+            if Epot is not None and len(Epot) > k:
+                update_dict["epot"] = Epot[k]
+                update_dict["etot"] = Ekin[k] + Epot[k]
+                
+            logs[k].write_row(update_dict)
 
     # new for on replicas because we start from .npy file saved in the previous step
     for k in range(args.replicas):
