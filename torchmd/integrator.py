@@ -45,7 +45,7 @@ PICOSEC2TIMEU = 1000.0 / TIMEFACTOR
 
 
 class Integrator:
-    def __init__(self, systems, forces, timestep, device, gamma=None, T=None):
+    def __init__(self, systems, forces, timestep, device, gamma=None, T=None, integrate_force=False):
         self.dt = timestep / TIMEFACTOR
         self.systems = systems
         self.forces = forces
@@ -53,6 +53,11 @@ class Integrator:
         gamma = gamma / PICOSEC2TIMEU
         self.gamma = gamma
         self.T = T
+        
+        if integrate_force:
+            assert self.forces.return_forces, "For integrate_force=True, forces must return direct forces. Set return_forces=True in Forces."
+            
+        self.integrate_force = integrate_force
         if T:
             M = self.forces.par.masses
             self.vcoeff = torch.sqrt(2.0 * gamma / M * BOLTZMAN * T * self.dt).to(
@@ -64,10 +69,18 @@ class Integrator:
         masses = self.forces.par.masses
         natoms = len(masses)
         for _ in range(niter):
-            _first_VV(s.pos, s.vel, s.forces, masses, self.dt)
-            pot = self.forces.compute(s.pos, s.box, s.forces)
+            _first_VV(s.pos, s.vel, s.forces, masses, self.dt) # first half update
+            
+            if self.integrate_force:
+                upd_forces = self.forces.compute(s.pos, s.box, s.forces) # directly get forces
+                s.forces = upd_forces # this will be used in the second half update
+                pot = None
+            else:
+                pot = self.forces.compute(s.pos, s.box, s.forces) # update forces internally for the second half update
+            
             if self.T:
                 langevin(s.vel, self.gamma, self.vcoeff, self.dt, self.device)
+            
             _second_VV(s.vel, s.forces, masses, self.dt)
 
         Ekin = np.array([v.item() for v in kinetic_energy(masses, s.vel)])

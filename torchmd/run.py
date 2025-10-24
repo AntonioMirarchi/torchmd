@@ -132,6 +132,7 @@ def get_args(arguments=None):
         help="Use increased masses for heavy atoms, suggested for noHydrogen systems",
     )
     parser.add_argument('--resume-dir', default=None, type=str, help='Path to the directory to resume the simulation')
+    parser.add_argument('--integrate-force', default=False, help='If the integrator should integrate using directly forces from the forces module')
     parser.add_argument('--return-forces', default=False, help='If the forces module should return directly forces instead of potential energy')
     
     args = parser.parse_args(args=arguments)
