@@ -132,7 +132,8 @@ def get_args(arguments=None):
         help="Use increased masses for heavy atoms, suggested for noHydrogen systems",
     )
     parser.add_argument('--resume-dir', default=None, type=str, help='Path to the directory to resume the simulation')
-
+    parser.add_argument('--return-forces', default=False, help='If the forces module should return directly forces instead of potential energy')
+    
     args = parser.parse_args(args=arguments)
     os.makedirs(args.log_dir, exist_ok=True)
     save_argparse(args, os.path.join(args.log_dir, "input.yaml"), exclude="conf")
@@ -242,6 +243,7 @@ def setup(args, batch_comp=False):
         rfa=args.rfa,
         switch_dist=args.switch_dist,
         exclusions=args.exclusions,
+        return_forces=args.return_forces,
     )
     return mol, system, forces, steps_done
 

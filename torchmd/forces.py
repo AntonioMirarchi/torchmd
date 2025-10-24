@@ -34,7 +34,9 @@ class Forces:
         solventDielectric=78.5,
         switch_dist=None,
         exclusions=("bonds", "angles", "1-4"),
+        return_forces=True,   # If True, return forces instead of potential energy
     ):
+        self.return_forces = return_forces
         self.par = parameters
         if terms is None:
             raise RuntimeError(
@@ -91,14 +93,20 @@ class Forces:
         calculateForces=True,
     ):
 
-        if calculateForces:
+        if self.return_forces:
+            if not calculateForces and not explicit_forces:
+                raise RuntimeError(
+                    """To return forces explicit_forces must be True when calculateForces is False. Please set explicit_forces=True and 
+                    be sure that the potentials return forces directly."""
+                )
+        elif calculateForces:
             if not explicit_forces and not pos.requires_grad:
                 raise RuntimeError(
                     "The positions passed don't require gradients. Please use pos.detach().requires_grad_(True) before passing."
                 )
         else:
-            explicit_forces = False
-
+            explicit_forces = False  
+            
         nsystems = pos.shape[0]
 
         pot = []
@@ -319,12 +327,14 @@ class Forces:
                         forces[i].index_add_(0, ava_idx[:, 1], forcevec)
 
         if self.external:
-            ext_ene, ext_force = self.external.calculate(pos, box)
-            for s in range(nsystems):
-                pot[s]["external"] = pot[s]["external"] + ext_ene[s]
+            ext_ene, ext_force = self.external.calculate(pos, box=None)
+            # assume that energy is not always returned
+            if len(ext_ene) > 0:
+                for s in range(nsystems):
+                    pot[s]["external"] += ext_ene[s]
             if explicit_forces:
                 forces += ext_force
-
+            
         if not explicit_forces and calculateForces:
             enesum = torch.zeros(1, device=pos.device, dtype=pos.dtype)
             for i in range(nsystems):
@@ -334,6 +344,9 @@ class Forces:
             forces[:] = -torch.autograd.grad(
                 enesum, pos, only_inputs=True, retain_graph=True
             )[0]
+        
+        if self.return_forces:
+            return forces # frames, natoms, 3
 
         if not returnDetails:
             pot = torch.stack([torch.sum(torch.cat(list(pp.values()))) for pp in pot])
