@@ -46,6 +46,25 @@ PICOSEC2TIMEU = 1000.0 / TIMEFACTOR
 
 class Integrator:
     def __init__(self, systems, forces, timestep, device, gamma=None, T=None, integrate_force=False):
+        """ Integrator for molecular dynamics simulations.
+        Parameters:
+        -----------
+        systems : Systems
+            The systems to be simulated.
+        forces : Forces
+            The forces acting on the systems.
+        timestep : float
+            The time step for the integration (in fs).
+        device : torch.device
+            The device to run the simulation on.
+        gamma : float, optional
+            The friction coefficient for Langevin dynamics (in ps^-1). If None, NVE ensemble is used.
+        T : float, optional
+            The temperature for Langevin dynamics (in K). If None, NVE ensemble is used.
+        integrate_force : bool, optional
+            If True, forces are updated directly in the integrator step.
+        -----------
+        """
         self.dt = timestep / TIMEFACTOR
         self.systems = systems
         self.forces = forces
