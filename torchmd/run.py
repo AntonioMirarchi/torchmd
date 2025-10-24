@@ -260,6 +260,7 @@ def dynamics(args, mol, system, forces, steps_done=None):
         device,
         gamma=args.langevin_gamma,
         T=args.langevin_temperature,
+        integrate_force=args.integrate_force,
     )
     wrapper = Wrapper(mol.numAtoms, mol.bonds if len(mol.bonds) else None, device)
 
