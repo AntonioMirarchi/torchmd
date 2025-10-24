@@ -59,6 +59,8 @@ def get_args(arguments=None):
     parser.add_argument('--resume-dir', default=None, type=str, help='Path to the directory to resume the simulation')
     parser.add_argument('--integrate-force', default=False, help='If the integrator should integrate using directly forces from the forces module')
     parser.add_argument('--return-forces', default=False, help='If the forces module should return directly forces instead of potential energy')
+    parser.add_argument('--explicit-forces', default=False, help='If True, it expects the potentials to return forces directly')
+    parser.add_argument('--calculate-forces', default=False, help='If True, compute the forces as derivative of the energy via autograd (explicit_forces needs to be True)')
     
     args = parser.parse_args(args=arguments)
     os.makedirs(args.log_dir, exist_ok=True)
@@ -215,8 +217,13 @@ def dynamics(args, mol, system, forces, steps_done=None):
         minimize_bfgs(system, forces, steps=args.minimize)
 
     iterator = tqdm(range(1, int(args.steps / args.output_period) + 1))
-    Epot = forces.compute(system.pos, system.box, system.forces)
-
+    Epot, forces = forces.compute(
+        system.pos,
+        system.box,
+        system.forces,
+        explicit_forces=args.explicit_forces,
+        calculateForces=args.calculate_forces,
+    )
     for i in iterator:
         if steps_done is not None and i < (steps_done+1):
             # best way to resume instead of modifying the iterator, the +1 is because we start from 1
@@ -251,7 +258,7 @@ def dynamics(args, mol, system, forces, steps_done=None):
             if Epot is not None and len(Epot) > k:
                 update_dict["epot"] = Epot[k]
                 update_dict["etot"] = Ekin[k] + Epot[k]
-                
+
             logs[k].write_row(update_dict)
 
     # new for on replicas because we start from .npy file saved in the previous step

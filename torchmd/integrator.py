@@ -91,11 +91,11 @@ class Integrator:
             _first_VV(s.pos, s.vel, s.forces, masses, self.dt) # first half update
             
             if self.integrate_force:
-                upd_forces = self.forces.compute(s.pos, s.box, s.forces) # directly get forces
+                pot, upd_forces = self.forces.compute(s.pos, s.box, s.forces) # directly get forces. pot is None
                 s.forces = upd_forces # this will be used in the second half update
                 pot = None
             else:
-                pot = self.forces.compute(s.pos, s.box, s.forces) # update forces internally for the second half update
+                pot, _ = self.forces.compute(s.pos, s.box, s.forces) # update forces internally for the second half update. forces output is None
             
             if self.T:
                 langevin(s.vel, self.gamma, self.vcoeff, self.dt, self.device)

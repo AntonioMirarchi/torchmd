@@ -346,7 +346,7 @@ class Forces:
             )[0]
         
         if self.return_forces:
-            return forces # frames, natoms, 3
+            return None, forces # frames, natoms, 3
 
         if not returnDetails:
             pot = torch.stack([torch.sum(torch.cat(list(pp.values()))) for pp in pot])
@@ -356,7 +356,7 @@ class Forces:
                 return [{k: v.cpu().item() for k, v in pp.items()} for pp in pot]
             else:
                 return [pp.cpu().item() for pp in pot]
-        return pot
+        return pot, None
 
     def _make_indeces(self, natoms, excludepairs, device):
         fullmat = np.full((natoms, natoms), True, dtype=bool)
