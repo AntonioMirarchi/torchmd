@@ -93,7 +93,6 @@ class Integrator:
             if self.integrate_force:
                 pot, upd_forces = self.forces.compute(s.pos, s.box, s.forces) # directly get forces. pot is None
                 s.forces = upd_forces # this will be used in the second half update
-                pot = None
             else:
                 pot, _ = self.forces.compute(s.pos, s.box, s.forces) # update forces internally for the second half update. forces output is None
             
