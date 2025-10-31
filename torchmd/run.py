@@ -162,6 +162,15 @@ def setup(args, batch_comp=False):
     system.set_velocities(
         maxwell_boltzmann(parameters.masses, args.temperature, args.replicas)
     )
+    if args.langevin_temperature is None: 
+        # we assume NVE and COM momentum conservation if no thermostat is used
+        # remove COM velocity
+        system.remove_com_velocity(parameters.masses)
+        # assert momentum conservation
+        p_xyz = (system.vel * parameters.masses.detach().clone().to(device=device)[None, :]) # (replicas, N, 3)
+        p = p_xyz.sum(dim=1)  # summing over atoms (replicas, 3)
+        p_tot = torch.linalg.norm(p, dim=-1)  # (replicas, )
+        print(f"Total momentum after removing COM velocity: {p_tot}") # should be close to zero
 
     forces = Forces(
         parameters,

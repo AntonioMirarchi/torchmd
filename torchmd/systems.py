@@ -80,3 +80,11 @@ class System:
         self.forces[:] = torch.tensor(
             forces, dtype=self.forces.dtype, device=self.forces.device
         )
+
+    def remove_com_velocity(self, masses):
+        # masses: np array of shape [natoms, 1]
+        total_mass = masses.sum()
+        # self.vel: [nreplicas, natoms, 3]
+        # (self.vel * masses[None, :]) -> [nreplicas, natoms, 3]
+        com_vel = (self.vel * masses[None, :]).sum(dim=1) / total_mass  # [nreplicas, 3]
+        self.vel -= com_vel[:, None, :]  # broadcast over atoms
