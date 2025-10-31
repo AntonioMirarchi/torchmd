@@ -19,8 +19,10 @@ def minimize_bfgs(system, forces, fmax=0.5, steps=1000):
     def evalfunc(coords, info):
         coords = coords.reshape(1, -1, 3)
         coords = torch.tensor(coords).type_as(system.pos)
-        Epot = forces.compute(coords, system.box, system.forces)[0]
-        grad = -system.forces.detach().cpu().numpy().astype(np.float64)[0]
+        # Epot = forces.compute(coords, system.box, system.forces)[0]
+        # grad = -system.forces.detach().cpu().numpy().astype(np.float64)[0]
+        Epot, grad = forces.compute(coords, system.box, system.forces, toNumpy=True, calculateForces=False) # get forces directly
+        Epot = 0.00000
         # display information
         if info["Nfeval"] % 1 == 0:
             print(
