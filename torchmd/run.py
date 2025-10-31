@@ -2,6 +2,7 @@ import os
 import torch
 from torchmd.systems import System
 from moleculekit.molecule import Molecule
+from moleculekit.smallmol.smallmol import SmallMol
 from torchmd.forcefields.forcefield import ForceField
 from torchmd.parameters import Parameters
 from torchmd.forces import Forces
@@ -89,9 +90,16 @@ def setup(args, batch_comp=False):
     torch.backends.cudnn.allow_tf32 = False
     device = torch.device(args.device)
     steps_done = None # for resuming the simulation
-    
+
     if args.topology is not None:
-        mol = Molecule(args.topology)
+        if args.topology.endswith(".sdf") or args.topology.endswith(".mol2"):
+            smol = SmallMol(args.topology)
+            mol = smol.toMolecule()
+        elif args.structure is not None:
+            mol = Molecule(args.structure)
+            mol.read(args.topology)  # for masses, atomtypes, bonds, etc.
+        else:
+            mol = Molecule(args.topology)
     elif args.structure is not None:
         mol = Molecule(args.structure)
         mol.box = (
