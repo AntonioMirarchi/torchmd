@@ -63,7 +63,8 @@ def get_args(arguments=None):
     parser.add_argument('--return-forces', default=False, help='If the forces module should return directly forces instead of potential energy')
     parser.add_argument('--explicit-forces', default=False, help='If True, it expects the potentials to return forces directly')
     parser.add_argument('--calculate-forces', default=False, help='If True, compute the forces as derivative of the energy via autograd (explicit_forces needs to be True)')
-    
+    parser.add_argument("--external-file", type=str, default=None, help="Override external.file")
+
     args = parser.parse_args(args=arguments)
     os.makedirs(args.log_dir, exist_ok=True)
     save_argparse(args, os.path.join(args.log_dir, "input.yaml"), exclude="conf")
@@ -153,7 +154,9 @@ def setup(args, batch_comp=False):
                 embeddings = torch.tensor(args.external["embeddings"]).repeat(
                     args.replicas, 1
                 )
-
+        if args.external_file is not None:
+            args.external["file"] = args.external_file # override external file if provided, useful for cmd line
+            
         file = args.external["file"]
         # remove from args.external the items that have been already passed to the external module
         args.external = {
