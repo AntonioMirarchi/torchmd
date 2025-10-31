@@ -58,6 +58,7 @@ def get_args(arguments=None):
     parser.add_argument("--npz_file", default=None, type=str, help="Input file.npz with coord and z")
     parser.add_argument("--useIncreasedMasses", default=False, help="Use increased masses for heavy atoms, suggested for noHydrogen systems")
     parser.add_argument('--resume-dir', default=None, type=str, help='Path to the directory to resume the simulation')
+    parser.add_argument('--save-final-coords', default=None, type=str, help='Path to save the final coordinates of the simulation')
     parser.add_argument('--integrate-force', default=False, help='If the integrator should integrate using directly forces from the forces module')
     parser.add_argument('--return-forces', default=False, help='If the forces module should return directly forces instead of potential energy')
     parser.add_argument('--explicit-forces', default=False, help='If True, it expects the potentials to return forces directly')
@@ -283,6 +284,13 @@ def dynamics(args, mol, system, forces, steps_done=None):
         npy_name = os.path.join(args.log_dir, args.output + f"_{k}.npy")
         xyz_name = os.path.join(args.log_dir, args.output + f"_{k}.xyz")
         xyz_writer(npy_name, xyz_name, mol.element)
+        # write alsot the xtc file
+        mol = Molecule(args.structure)
+        mol.coords = np.stack(trajs[k], axis=2).astype(np.float32)
+        mol.write(os.path.join(args.log_dir, args.output + f"_{k}.xtc"))
+        if args.save_final_coords is not None:
+            mol.write(os.path.join(args.log_dir, args.output + f"_final_{k}.pdb"), frames=-1)
+
 
 if __name__ == "__main__":
     args = get_args()
