@@ -69,8 +69,10 @@ class Integrator:
         self.systems = systems
         self.forces = forces
         self.device = device
-        gamma = gamma / PICOSEC2TIMEU
-        self.gamma = gamma
+        self.gamma = None
+        if gamma is not None:
+            gamma = gamma / PICOSEC2TIMEU
+            self.gamma = gamma
         self.T = T
         
         if integrate_force:
