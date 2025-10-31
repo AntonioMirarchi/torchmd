@@ -329,7 +329,7 @@ class Forces:
         if self.external:
             ext_ene, ext_force = self.external.calculate(pos, box=None)
             # assume that energy is not always returned
-            if len(ext_ene) > 0:
+            if len(ext_ene) > 0 and calculateForces: # if CalculateForces is False, then ext_ene is the curl no potential energy
                 for s in range(nsystems):
                     pot[s]["external"] += ext_ene[s]
             if explicit_forces:
@@ -344,18 +344,20 @@ class Forces:
             forces[:] = -torch.autograd.grad(
                 enesum, pos, only_inputs=True, retain_graph=True
             )[0]
-        
+
         if self.return_forces:
-            return None, forces # frames, natoms, 3
+            if toNumpy:
+                return ext_ene.cpu().numpy(), forces.cpu().numpy()  # frames, natoms, 3
+            return ext_ene, forces # frames, natoms, 3
 
         if not returnDetails:
             pot = torch.stack([torch.sum(torch.cat(list(pp.values()))) for pp in pot])
 
         if toNumpy:
             if returnDetails:
-                return [{k: v.cpu().item() for k, v in pp.items()} for pp in pot]
+                return [{k: v.cpu().item() for k, v in pp.items()} for pp in pot], None
             else:
-                return [pp.cpu().item() for pp in pot]
+                return [pp.cpu().item() for pp in pot], None
         return pot, None
 
     def _make_indeces(self, natoms, excludepairs, device):
