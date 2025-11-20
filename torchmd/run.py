@@ -7,7 +7,7 @@ from torchmd.forcefields.forcefield import ForceField
 from torchmd.parameters import Parameters
 from torchmd.forces import Forces
 from torchmd.forces_nnp import NNPForces
-from torchmd.integrator import get_integrator
+from torchmd.integrator import get_integrator, INTEGRATOR_MAP
 from torchmd.wrapper import Wrapper
 import numpy as np
 from tqdm import tqdm
@@ -67,7 +67,7 @@ def get_args(arguments=None):
     parser.add_argument("--external-file", type=str, default=None, help="Override external.file")
     parser.add_argument('--mts-framestep', default=0, type=int, help='Framestep for multiple time step integration. If >0, enable multiple time step integration with force correction every N steps')
     parser.add_argument('--slow-external', default=None, type=str, help="String to the conservative external module for MTS, this will be used to correct the fast external forces, e.g. NC MLIPs")
-    parser.add_argument('--integrator', default='langevin', type=str, choices=['langevin', 'middle_langevin', 'mts_langevin', 'baoab'], help="Type of integrator to use")
+    parser.add_argument('--integrator', default='langevin', type=str, choices=INTEGRATOR_MAP.keys(), help="Type of integrator to use")
     
     args = parser.parse_args(args=arguments)
     os.makedirs(args.log_dir, exist_ok=True)
@@ -226,6 +226,7 @@ def dynamics(args, mol, system, forces, slow_forces, steps_done=None):
         T=args.langevin_temperature,
         slow_forces=slow_forces,
         mts_framestep=args.mts_framestep,
+        integrate_force=args.integrate_force,
     )
     wrapper = Wrapper(mol.numAtoms, mol.bonds if len(mol.bonds) else None, device)
 

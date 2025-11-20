@@ -331,7 +331,15 @@ def get_integrator(name, systems, forces, timestep, device, gamma=None, T=None, 
         raise ValueError(f"Unknown integrator: {name}. Available: {list(INTEGRATOR_MAP.keys())}")
     
     integrator_class = INTEGRATOR_MAP[name]
-    
+    import inspect
+    sig = inspect.signature(integrator_class.__init__)
+    param_names = sig.parameters.keys()
+    if 'slow_forces' in param_names and 'slow_forces' not in kwargs:
+        raise ValueError(f"Integrator {name} requires 'slow_forces' argument.")
+    else:
+        kwargs.pop('slow_forces', None)
+        kwargs.pop('mts_framestep', None)
+        
     return integrator_class(
         systems=systems, 
         forces=forces, 
