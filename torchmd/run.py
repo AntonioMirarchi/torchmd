@@ -6,7 +6,8 @@ from moleculekit.smallmol.smallmol import SmallMol
 from torchmd.forcefields.forcefield import ForceField
 from torchmd.parameters import Parameters
 from torchmd.forces import Forces
-from torchmd.integrator import Integrator
+from torchmd.forces_nnp import NNPForces
+from torchmd.integrator import get_integrator
 from torchmd.wrapper import Wrapper
 import numpy as np
 from tqdm import tqdm
@@ -64,7 +65,10 @@ def get_args(arguments=None):
     parser.add_argument('--explicit-forces', default=False, help='If True, it expects the potentials to return forces directly')
     parser.add_argument('--calculate-forces', default=False, help='If True, compute the forces as derivative of the energy via autograd (explicit_forces needs to be True)')
     parser.add_argument("--external-file", type=str, default=None, help="Override external.file")
-
+    parser.add_argument('--mts-framestep', default=0, type=int, help='Framestep for multiple time step integration. If >0, enable multiple time step integration with force correction every N steps')
+    parser.add_argument('--slow-external', default=None, type=str, help="String to the conservative external module for MTS, this will be used to correct the fast external forces, e.g. NC MLIPs")
+    parser.add_argument('--integrator', default='langevin', type=str, choices=['langevin', 'middle_langevin', 'mts_langevin', 'baoab'], help="Type of integrator to use")
+    
     args = parser.parse_args(args=arguments)
     os.makedirs(args.log_dir, exist_ok=True)
     save_argparse(args, os.path.join(args.log_dir, "input.yaml"), exclude="conf")
@@ -184,31 +188,44 @@ def setup(args, batch_comp=False):
         p_tot = torch.linalg.norm(p, dim=-1)  # (replicas, )
         print(f"Total momentum after removing COM velocity: {p_tot}") # should be close to zero
 
-    forces = Forces(
+    forces = NNPForces(
         parameters,
-        terms=args.forceterms,
         external=external,
-        cutoff=args.cutoff,
-        rfa=args.rfa,
-        switch_dist=args.switch_dist,
-        exclusions=args.exclusions,
         return_forces=args.return_forces,
     )
-    return mol, system, forces, steps_done
+    
+    slow_forces = None
+    if args.mts_framestep > 0:
+        # derivative true to get neg_dy
+        args.external.pop('derivative')
+        s_external = externalmodule.External(
+            args.slow_external, embeddings, device=device, derivative=True, **args.external
+        )
+        slow_forces = NNPForces(
+            parameters,
+            external=s_external,
+            return_forces=args.return_forces,
+        )
+        print("Multiple time step integration enabled.")
+        
+    return mol, system, forces, slow_forces, steps_done
 
 
-def dynamics(args, mol, system, forces, steps_done=None):
+def dynamics(args, mol, system, forces, slow_forces, steps_done=None):
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
     device = torch.device(args.device)
-    integrator = Integrator(
-        system,
-        forces,
-        args.timestep,
-        device,
+    # Initialize Integrator dynamically
+    integrator = get_integrator(
+        name=args.integrator,
+        systems=system,
+        forces=forces,
+        timestep=args.timestep,
+        device=device,
         gamma=args.langevin_gamma,
         T=args.langevin_temperature,
-        integrate_force=args.integrate_force,
+        slow_forces=slow_forces,
+        mts_framestep=args.mts_framestep,
     )
     wrapper = Wrapper(mol.numAtoms, mol.bonds if len(mol.bonds) else None, device)
 
@@ -244,6 +261,7 @@ def dynamics(args, mol, system, forces, steps_done=None):
         system.forces,
         explicit_forces=args.explicit_forces,
         calculateForces=args.calculate_forces,
+        toNumpy=False,
     )
     for i in iterator:
         if steps_done is not None and i < (steps_done+1):
@@ -282,6 +300,10 @@ def dynamics(args, mol, system, forces, steps_done=None):
 
             logs[k].write_row(update_dict)
 
+    if len(integrator.curl_storage) > 0:
+        print(f"Saving curl data for analysis, total frames stored: {len(integrator.curl_storage)}")
+        curl_npy = os.path.join(args.log_dir,'curl_data.npy')
+        np.save(curl_npy, np.array(integrator.curl_storage))
     # new for on replicas because we start from .npy file saved in the previous step
     for k in range(args.replicas):
         npy_name = os.path.join(args.log_dir, args.output + f"_{k}.npy")
@@ -297,5 +319,5 @@ def dynamics(args, mol, system, forces, steps_done=None):
 
 if __name__ == "__main__":
     args = get_args()
-    mol, system, forces, steps = setup(args)
-    dynamics(args, mol, system, forces, steps)
+    mol, system, forces, slow_forces, steps = setup(args)
+    dynamics(args, mol, system, forces, slow_forces, steps)

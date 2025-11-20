@@ -15,6 +15,7 @@ class System:
 
         self.to_(device)
         self.precision_(precision)
+        self.dof = 3 * natoms  # default degrees of freedom
 
     @property
     def natoms(self):
@@ -88,3 +89,6 @@ class System:
         # (self.vel * masses[None, :]) -> [nreplicas, natoms, 3]
         com_vel = (self.vel * masses[None, :]).sum(dim=1) / total_mass  # [nreplicas, 3]
         self.vel -= com_vel[:, None, :]  # broadcast over atoms
+        
+        # overwrite dof property to account for removed com velocity
+        self.dof = 3 * self.natoms - 3  # remove 3 dof for linear momentum conservation
