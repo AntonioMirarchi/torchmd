@@ -177,14 +177,13 @@ class LangevinIntegrator(Integrator):
 
 class LangevinMiddleIntegrator(Integrator):
     """
-    Langevin Middle Integrator using the VVROR scheme.
+    Langevin Middle Integrator using the VVROR scheme. Based on discussion: https://github.com/openmm/openmm/issues/2532
     
     Sequence:
-    1. V: Half-step Kick
+    1. VV: Full-step Kick (Velocity update)
     2. R: Full-step Drift (Position update)
-    3. Force Update
-    4. O: Thermostat (Ornstein-Uhlenbeck)
-    5. V: Half-step Kick
+    3. O: Thermostat (Ornstein-Uhlenbeck)
+    4. Force Evaluation
     
     This scheme results in velocities that are effectively half-step (leapfrog),
     which often provides a more accurate representation of Kinetic Energy 
@@ -199,30 +198,26 @@ class LangevinMiddleIntegrator(Integrator):
         dt = self.dt
         
         for _ in range(niter):
-            # --- V: First Half Kick ---
-            # v(t + dt/2) = v(t) + 0.5 * a(t) * dt
-            accel = s.forces / masses
-            s.vel += 0.5 * dt * accel
+            # 1. Kick: v(t - dt/2) -> v(t + dt/2)
+            # We update velocity by a full timestep using the current force F(x(t))
+            # Note: In the very first step of a simulation, if s.vel is v(0), this effectively 
+            # creates a half-step lag. This is standard behavior for Leapfrog-style integrators.
+            s.vel += dt * (s.forces / masses)
             
-            # --- R: Full Position Update (Drift) ---
-            # r(t + dt) = r(t) + v(t + dt/2) * dt
-            s.pos += s.vel * dt
-            
-            # --- Force Update ---
-            # F(t + dt) computed at new positions
-            pot, s.forces = self._compute_forces(s.pos, s.box, s.forces)
-            
-            # --- O: Thermostat ---
-            # Applied after force evaluation but before the second kick.
-            # If T is None, this step is skipped (NVE limit).
+            # 2. Thermostat (Middle): Apply OU process to v(t + dt/2)
+            # This modifies the velocity in-place.
             if self.T is not None:
                 self._ou_step(s.vel)
             
-            # --- V: Second Half Kick ---
-            # v(t + dt) = v_thermo + 0.5 * a(t + dt) * dt
-            accel = s.forces / masses
-            s.vel += 0.5 * dt * accel
+            # 3. Drift: x(t) -> x(t + dt)
+            # Use the thermostated half-step velocity
+            s.pos += s.vel * dt
+            
+            # 4. Force evaluation: F(x(t + dt))
+            pot, s.forces = self._compute_forces(s.pos, s.box, s.forces)
 
+        # The velocity currently stored in s.vel is v(t + dt/2) (thermostated).
+        # This is the correct velocity for accurate KE/Temperature calculation in LFMiddle.
         Ekin = np.array([v.item() for v in kinetic_energy(masses, s.vel)])
         T_curr = kinetic_to_temp(Ekin, s.dof)
         return Ekin, pot.cpu().numpy(), T_curr
@@ -234,48 +229,59 @@ class MTSIntegrator(Integrator):
     Can also revert to NVE-MTS if T is None. This is based on https://arxiv.org/abs/2412.11569 to use slow force corrections.
     """
     def __init__(self, systems, forces, slow_forces, timestep, device, gamma=None, T=None, integrate_force=False, mts_framestep=0):
+        assert T is None, "MTSIntegrator currently only supports NVE-MTS (thermostat T must be None)."
         super().__init__(systems, forces, slow_forces, timestep, device, gamma, T, integrate_force, mts_framestep)
-    
+
     def step(self, niter=1, curr_step=0):
         s = self.systems
         masses = self.forces.par.masses
         dt = self.dt
-        M = self.mts_framestep
+        M = self.mts_framestep # e.g., 8
         
         for step in range(curr_step, curr_step + niter):
             is_mts_start = (step % M) == 0
-            
-            # --- Slow Force Impulse (Start) ---
-            if is_mts_start and self._f_correction is None:
-                _, fast_force_check, _ = self.slow_forces.compute(
+            is_mts_end = ((step + 1) % M) == 0
+            # --- 1. Slow Force Impulse (Start) ---
+            # This is only executed on the first step of a slow block (k=0, M, 2M, ...)
+            if is_mts_start:
+                # 1a. Compute F_slow(t) (The expensive part)
+                _, f_slow_curr, _ = self.slow_forces.compute(
                     s.pos, s.box, s.forces, toNumpy=False, calculateForces=False
                 )
-                # Correction = Total_Slow - Fast_Approximation
-                self._f_correction = fast_force_check - s.forces 
+                
+                # 1b. Calculate Correction F_slow - F_fast 
+                # (s.forces holds F_fast from the *previous* step, which is F_fast(t-dt_slow) if at step 0)
+                self._f_correction = f_slow_curr - s.forces 
+                
+                # 1c. Apply the first half of the slow force impulse (V_slow^1/2)
+                # Use the full slow time step M*dt
                 s.vel += 0.5 * (dt * M) * (self._f_correction / masses)
 
-            # --- Fast Inner Loop (Velocity Verlet / BAOAB) ---
-            # 1. Half Kick Fast
+            # --- 2. Fast Inner Loop (Velocity Verlet V_fast R V_fast) ---
+            # Applied M times over the slow step duration.
+            
+            # 2a. Half Kick Fast (V_fast^1/2)
             s.vel += 0.5 * dt * (s.forces / masses)
             
-            # 2. Drift Fast
+            # 2b. Drift Fast (R)
             s.pos += s.vel * dt
             
-            # 3. Force Update Fast
+            # 2c. Force Update Fast (Compute F_fast(t+dt))
             pot, s.forces = self._compute_forces(s.pos, s.box, s.forces)
 
-            # 4. Thermostat (Optional)
-            if self.T is not None:
-                self._ou_step(s.vel)
-
-            # 5. Half Kick Fast
+            # 2d. Half Kick Fast (V_fast^1/2)
             s.vel += 0.5 * dt * (s.forces / masses)
             
-            # --- Slow Force Impulse (End) ---
-            if ((step + 1) % M) == 0:
+            # --- 3. Slow Force Impulse (End) ---
+            # This is only executed on the last step of a slow block (k=M-1, 2M-1, ...)
+            if is_mts_end:
+                # 3a. Apply the second half of the slow force impulse (V_slow^1/2)
+                # Use the full slow time step M*dt
                 s.vel += 0.5 * (dt * M) * (self._f_correction / masses)
-                self._f_correction = None 
-        
+                
+                # 3b. Clear correction for next slow step
+                self._f_correction = None
+                        
         Ekin = np.array([v.item() for v in kinetic_energy(masses, s.vel)])
         T_curr = kinetic_to_temp(Ekin, s.dof)
         return Ekin, pot.cpu().numpy(), T_curr
