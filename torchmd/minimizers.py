@@ -5,7 +5,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def minimize_bfgs(system, forces, fmax=0.5, steps=1000):
+def minimize_bfgs(system, forces, fmax=0.5, steps=1000, integrate_force=False):
     from scipy.optimize import minimize
 
     if steps == 0:
@@ -16,13 +16,15 @@ def minimize_bfgs(system, forces, fmax=0.5, steps=1000):
             "System minimization currently doesn't support replicas. Talk with Stefan to implement it."
         )
 
-    def evalfunc(coords, info):
+    def evalfunc(coords, info, integrate_force):
         coords = coords.reshape(1, -1, 3)
         coords = torch.tensor(coords).type_as(system.pos)
-        # Epot = forces.compute(coords, system.box, system.forces)[0]
-        # grad = -system.forces.detach().cpu().numpy().astype(np.float64)[0]
-        Epot, grad = forces.compute(coords, system.box, system.forces, toNumpy=True, calculateForces=False) # get forces directly
-        Epot = 0.00000
+        if not integrate_force:
+            Epot = forces.compute(coords, system.box, system.forces,)[0]
+            grad = -system.forces.detach().cpu().numpy().astype(np.float64)[0]
+        else:
+            Epot, grad, _ = forces.compute(coords, system.box, system.forces, toNumpy=True, calculateForces=False) # get forces directly
+            Epot = 0.00000
         # display information
         if info["Nfeval"] % 1 == 0:
             print(
@@ -42,7 +44,7 @@ def minimize_bfgs(system, forces, fmax=0.5, steps=1000):
         method="L-BFGS-B",
         jac=True,
         options={"gtol": fmax, "maxiter": steps, "disp": False},
-        args=({"Nfeval": 0},),
+        args=({"Nfeval": 0}, integrate_force),
     )
 
     system.pos = torch.tensor(
