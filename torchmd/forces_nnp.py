@@ -10,8 +10,6 @@ class NNPForces:
     ----------
 
     """
-
-
     def __init__(
         self,
         parameters,
@@ -60,8 +58,10 @@ class NNPForces:
         # force correction from: 'The dark side of the forces' https://arxiv.org/abs/2412.11569 (sec H)
         # conservative forces computed as -grad V (neg_dy) (Tensornet)
         # non-conservative forces computed directly from the model as equivariant-vector (v-Tensornet)
+        # vec shape num_systems x num_atoms x 3
+        # y: shape num_systems, 1
         y, vec = self.external.calculate(pos, box=None)
-        
+
         # if is_conservative, then y: energy, vec: -dy
         # if not is_conservative, then y: curl (if compute_curl true), vec: vector output forces
         is_conservative = not self.external.model.non_conservative
@@ -81,5 +81,4 @@ class NNPForces:
                                                 
         if toNumpy:
             return pot.detach().cpu().numpy(), forces.detach().cpu().numpy(), all_curl.detach().cpu().numpy()
-        
         return pot, forces, all_curl
