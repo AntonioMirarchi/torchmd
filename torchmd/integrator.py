@@ -101,16 +101,20 @@ class Integrator(ABC):
         if gamma is not None and T is not None:
             # Convert gamma from ps^-1 to internal_time^-1
             # 1 ps = 1000 fs = 1000 * TIMEFACTOR internal units
-            PICOSEC2TIMEU = 1000.0 * TIMEFACTOR
-            self.gamma = gamma / PICOSEC2TIMEU
+            gamma = gamma / PICOSEC2TIMEU
+            masses = self.forces.par.masses
+            # prmtr used by Langevin (origin integrator)
+            self.vcoeff = torch.sqrt(2.0 * gamma / masses * BOLTZMAN * T * self.dt).to(
+                device
+            )
+            self.gamma = gamma
             
-            # Exact Ornstein-Uhlenbeck coefficients
+            # Exact Ornstein-Uhlenbeck coefficients. Used by LangevinMiddle and MTS integrators.
             # v(t+dt) = alpha * v(t) + sigma * N(0,1)
             # alpha = exp(-gamma * dt)
             self.alpha = torch.exp(torch.tensor(-self.gamma * self.dt, device=device))
             
             # sigma = sqrt( (1 - alpha^2) * kB * T / m )
-            masses = self.forces.par.masses
             self.sigma = torch.sqrt((1.0 - self.alpha**2) * BOLTZMAN * T / masses).to(device)
         
         # MTS State
