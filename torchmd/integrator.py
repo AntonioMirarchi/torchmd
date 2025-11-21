@@ -122,17 +122,17 @@ class Integrator(ABC):
             assert self.slow_forces is not None, "MTS requires slow_forces."
             self._f_correction = None
             
-    def _compute_forces(self, pos, forces_prev):
+    def _compute_forces(self, pos, box, forces_i):
         """Helper to compute forces."""
         if self.integrate_force:
             pot, vec, curl = self.forces.compute(
-                pos, self.systems.box, forces_prev, toNumpy=False, calculateForces=False
+                pos, box, forces_i, toNumpy=False, calculateForces=False
             )
             if isinstance(curl, torch.Tensor) and (curl != 0).any():
                 self.curl_storage.append(curl)
             return pot, vec
         else:
-            pot, _ = self.forces.compute(pos, self.systems.box, forces_prev)
+            pot, _ = self.forces.compute(pos, box, forces_i)
             return pot, self.systems.forces
 
     def _ou_step(self, vel):
@@ -152,7 +152,7 @@ class LangevinIntegrator(Integrator):
     Standard Velocity Verlet with optional Langevin thermostat.
     
     If T is None: Pure NVE Velocity Verlet.
-    If T is Set:  Velocity Verlet with BAOAB-style thermostatting.
+    If T is Set:  Velocity Verlet with Langevin thermostat.
     """
     def __init__(self, systems, forces, timestep, device, gamma=None, T=None, integrate_force=False):
         super().__init__(systems, forces, None, timestep, device, gamma, T, integrate_force)
@@ -160,11 +160,11 @@ class LangevinIntegrator(Integrator):
     def step(self, niter=1, curr_step=0):
         s = self.systems
         masses = self.forces.par.masses
-        dt = self.dt
-        
+
         for _ in range(niter):
             _first_VV(s.pos, s.vel, s.forces, masses, self.dt)
-            pot, s.forces = self._compute_forces(s.pos, s.forces)
+            
+            pot, s.forces = self._compute_forces(s.pos, s.box, s.forces)
             
             if self.T is not None:
                 langevin(s.vel, self.gamma, self.vcoeff, self.dt, self.device)
@@ -172,7 +172,7 @@ class LangevinIntegrator(Integrator):
             _second_VV(s.vel, s.forces, masses, self.dt)
 
         Ekin = np.array([v.item() for v in kinetic_energy(masses, s.vel)])
-        T_curr = kinetic_to_temp(Ekin, self.systems.dof)
+        T_curr = kinetic_to_temp(Ekin, s.dof)
         return Ekin, pot.cpu().numpy(), T_curr
 
 class LangevinMiddleIntegrator(Integrator):
@@ -210,7 +210,7 @@ class LangevinMiddleIntegrator(Integrator):
             
             # --- Force Update ---
             # F(t + dt) computed at new positions
-            pot, s.forces = self._compute_forces(s.pos, s.forces)
+            pot, s.forces = self._compute_forces(s.pos, s.box, s.forces)
             
             # --- O: Thermostat ---
             # Applied after force evaluation but before the second kick.
@@ -224,7 +224,7 @@ class LangevinMiddleIntegrator(Integrator):
             s.vel += 0.5 * dt * accel
 
         Ekin = np.array([v.item() for v in kinetic_energy(masses, s.vel)])
-        T_curr = kinetic_to_temp(Ekin, self.systems.dof)
+        T_curr = kinetic_to_temp(Ekin, s.dof)
         return Ekin, pot.cpu().numpy(), T_curr
 
 class MTSIntegrator(Integrator):
@@ -262,7 +262,7 @@ class MTSIntegrator(Integrator):
             s.pos += s.vel * dt
             
             # 3. Force Update Fast
-            pot, s.forces = self._compute_forces(s.pos, s.forces)
+            pot, s.forces = self._compute_forces(s.pos, s.box, s.forces)
 
             # 4. Thermostat (Optional)
             if self.T is not None:
@@ -277,7 +277,7 @@ class MTSIntegrator(Integrator):
                 self._f_correction = None 
         
         Ekin = np.array([v.item() for v in kinetic_energy(masses, s.vel)])
-        T_curr = kinetic_to_temp(Ekin, self.systems.dof)
+        T_curr = kinetic_to_temp(Ekin, s.dof)
         return Ekin, pot.cpu().numpy(), T_curr
 
 
@@ -307,13 +307,13 @@ class BAOABIntegrator(Integrator):
             s.pos += 0.5 * dt * s.vel
             
             # Force Update
-            pot, s.forces = self._compute_forces(s.pos, s.forces)
+            pot, s.forces = self._compute_forces(s.pos, s.box, s.forces)
             
             # B: Second half kick
             s.vel += 0.5 * dt * (s.forces / masses)
         
         Ekin = np.array([v.item() for v in kinetic_energy(masses, s.vel)])
-        T_curr = kinetic_to_temp(Ekin, self.systems.dof)
+        T_curr = kinetic_to_temp(Ekin, s.dof)
         return Ekin, pot.cpu().numpy(), T_curr
 
 INTEGRATOR_MAP = {
