@@ -7,7 +7,8 @@ from torchmd.forcefields.forcefield import ForceField
 from torchmd.parameters import Parameters
 from torchmd.forces import Forces
 from torchmd.forces_nnp import NNPForces
-from torchmd.integrator import get_integrator, INTEGRATOR_MAP
+from torchmd import integrator as integrator_modules
+import inspect
 from torchmd.wrapper import Wrapper
 import numpy as np
 from tqdm import tqdm
@@ -67,7 +68,7 @@ def get_args(arguments=None):
     parser.add_argument("--external-file", type=str, default=None, help="Override external.file")
     parser.add_argument('--mts-framestep', default=0, type=int, help='Framestep for multiple time step integration. If >0, enable multiple time step integration with force correction every N steps')
     parser.add_argument('--slow-external', default=None, type=str, help="String to the conservative external module for MTS, this will be used to correct the fast external forces, e.g. NC MLIPs")
-    parser.add_argument('--integrator', default='langevin', type=str, choices=INTEGRATOR_MAP.keys(), help="Type of integrator to use")
+    parser.add_argument('--integrator', default='LangevinMiddleIntegrator', type=str, choices=integrator_modules.__all__, help="Type of integrator to use")
     
     args = parser.parse_args(args=arguments)
     os.makedirs(args.log_dir, exist_ok=True)
@@ -215,19 +216,24 @@ def dynamics(args, mol, system, forces, slow_forces, steps_done=None):
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
     device = torch.device(args.device)
-    # Initialize Integrator dynamically
-    integrator = get_integrator(
-        name=args.integrator,
-        systems=system,
-        forces=forces,
-        timestep=args.timestep,
-        device=device,
-        gamma=args.langevin_gamma,
-        T=args.langevin_temperature,
-        slow_forces=slow_forces,
-        mts_framestep=args.mts_framestep,
-        integrate_force=args.integrate_force,
-    )
+    int_class = getattr(integrator_modules, args.integrator)
+    integrator_args = {
+        "systems": system,
+        "forces": forces,
+        "timestep": args.timestep,
+        "device": device,
+        "T": args.langevin_temperature,
+        "gamma": args.langevin_gamma,
+        "slow_forces": slow_forces,
+        "mts_framestep": args.mts_framestep,
+        "integrate_force": args.integrate_force,
+    }
+    
+    int_sig = inspect.signature(int_class)
+    
+    filtered_integrator_args = {
+        k: v for k, v in integrator_args.items() if k in int_sig.parameters}
+    integrator = int_class(**filtered_integrator_args)
     wrapper = Wrapper(mol.numAtoms, mol.bonds if len(mol.bonds) else None, device)
 
     outputname, outputext = os.path.splitext(args.output)
