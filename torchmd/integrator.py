@@ -191,29 +191,39 @@ class LangevinMiddleIntegrator(Integrator):
     """
     def __init__(self, systems, forces, timestep, device, gamma=None, T=None, integrate_force=False):
         super().__init__(systems, forces, None, timestep, device, gamma, T, integrate_force)
+        self._initialized = False
     
     def step(self, niter=1, curr_step=0):
         s = self.systems
         masses = self.forces.par.masses
         dt = self.dt
         
-        for _ in range(niter):
-            # 1. Kick: v(t - dt/2) -> v(t + dt/2)
-            # We update velocity by a full timestep using the current force F(x(t))
-            # Note: In the very first step of a simulation, if s.vel is v(0), this effectively 
-            # creates a half-step lag. This is standard behavior for Leapfrog-style integrators.
-            s.vel += dt * (s.forces / masses)
+        if not self._initialized:
+            # Ensure forces are computed at initial positions
+            if s.forces is None or torch.all(s.forces == 0.0):
+                raise RuntimeError(
+                    "system.forces is None. You must compute forces at initial "
+                    "positions before calling integrator.step() for the first time."
+                )
             
-            # 2. Thermostat (Middle): Apply OU process to v(t + dt/2)
-            # This modifies the velocity in-place.
+            # Shift velocity from v(0) to v(dt/2)
+            # Equation: v(dt/2) = v(0) + 0.5*dt * F(x(0))/m
+            accel = s.forces / masses  # a(0) = F(x(0)) / m
+            s.vel += 0.5 * dt * accel  # v(0) → v(dt/2)
+            
+            self._initialized = True
+            # State now: x(0), v(dt/2), F(x(0))
+        
+        for _ in range(niter):
+            accel = s.forces / masses
+            s.vel += dt * accel
+            
+            s.pos += dt * s.vel
+            
             if self.T is not None:
                 self._ou_step(s.vel)
             
-            # 3. Drift: x(t) -> x(t + dt)
-            # Use the thermostated half-step velocity
-            s.pos += s.vel * dt
-            
-            # 4. Force evaluation: F(x(t + dt))
+            # This updates system.forces for next iteration
             pot, s.forces = self._compute_forces(s.pos, s.box, s.forces)
 
         # The velocity currently stored in s.vel is v(t + dt/2) (thermostated).
