@@ -23,6 +23,7 @@ def minimize_bfgs(system, forces, fmax=0.5, steps=1000, integrate_force=False):
             Epot = forces.compute(coords, system.box, system.forces,)[0]
             grad = -system.forces.detach().cpu().numpy().astype(np.float64)[0]
         else:
+            # here grad is not the ngeative gradient of Epot, but the forces directly obtained from the model
             Epot, grad, _ = forces.compute(coords, system.box, system.forces, toNumpy=True, calculateForces=False) # get forces directly
             Epot = 0.00000
         # display information

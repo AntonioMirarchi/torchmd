@@ -83,6 +83,7 @@ class Integrator(ABC):
         self.systems = systems
         self.forces = forces
         self.slow_forces = slow_forces
+        self.slow_forces = slow_forces
         self.device = device
         self.T = T
         self.integrate_force = integrate_force
@@ -125,14 +126,17 @@ class Integrator(ABC):
     def _compute_forces(self, pos, box, forces_i):
         """Helper to compute forces."""
         if self.integrate_force:
-            pot, vec, curl = self.forces.compute(
+            # nnpforces class takes care of in-place update of forces_i
+            # and also returns neg_dy or vec bases on the flag: integrate_neg_dy
+            pot, f, curl = self.forces.compute(
                 pos, box, forces_i, toNumpy=False, calculateForces=False
             )
             if isinstance(curl, torch.Tensor) and (curl != 0).any():
                 self.curl_storage.append(curl)
-            return pot, vec
+            return pot, f
         else:
-            pot, _ = self.forces.compute(pos, box, forces_i)
+            #TOTEST
+            pot, _, _, _ = self.forces.compute(pos, box, forces_i)
             return pot, self.systems.forces
 
     def _ou_step(self, vel):

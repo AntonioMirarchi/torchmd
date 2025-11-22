@@ -327,7 +327,8 @@ class Forces:
                         forces[i].index_add_(0, ava_idx[:, 1], forcevec)
 
         if self.external:
-            ext_ene, ext_force = self.external.calculate(pos, box=None)
+            ext_ene, neg_dy, ext_force, curl = self.external.calculate(pos, box=None)
+            
             # assume that energy is not always returned
             if len(ext_ene) > 0 and calculateForces: # if CalculateForces is False, then ext_ene is the curl no potential energy
                 for s in range(nsystems):

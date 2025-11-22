@@ -60,7 +60,7 @@ def get_args(arguments=None):
     parser.add_argument("--npz_file", default=None, type=str, help="Input file.npz with coord and z")
     parser.add_argument("--useIncreasedMasses", default=False, help="Use increased masses for heavy atoms, suggested for noHydrogen systems")
     parser.add_argument('--resume-dir', default=None, type=str, help='Path to the directory to resume the simulation')
-    parser.add_argument('--save-final-coords', default=None, type=str, help='Path to save the final coordinates of the simulation')
+    # new args
     parser.add_argument('--integrate-force', default=False, help='If the integrator should integrate using directly forces from the forces module')
     parser.add_argument('--return-forces', default=False, help='If the forces module should return directly forces instead of potential energy')
     parser.add_argument('--explicit-forces', default=False, help='If True, it expects the potentials to return forces directly')
@@ -69,6 +69,8 @@ def get_args(arguments=None):
     parser.add_argument('--mts-framestep', default=0, type=int, help='Framestep for multiple time step integration. If >0, enable multiple time step integration with force correction every N steps')
     parser.add_argument('--slow-external', default=None, type=str, help="String to the conservative external module for MTS, this will be used to correct the fast external forces, e.g. NC MLIPs")
     parser.add_argument('--integrator', default='LangevinMiddleIntegrator', type=str, choices=integrator_modules.__all__, help="Type of integrator to use")
+    parser.add_argument('--save-final-coords', default=False, type=bool, help='If True, save final coordinates to a pdb file')
+    parser.add_argument("--velocities-file", type=str, default=None, help="File from which to load initial velocities (.npy), otherwise sampled from MB distribution")
     
     args = parser.parse_args(args=arguments)
     os.makedirs(args.log_dir, exist_ok=True)
@@ -96,7 +98,7 @@ def setup(args, batch_comp=False):
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     device = torch.device(args.device)
-    steps_done = None # for resuming the simulation
+    steps_done = None  # for resuming the simulation
 
     if args.topology is not None:
         if args.topology.endswith(".sdf") or args.topology.endswith(".mol2"):
@@ -134,12 +136,13 @@ def setup(args, batch_comp=False):
     if args.useIncreasedMasses:
         print("Using Increased Masses for Heavy Atoms")
         print(f"Initial Molecule Mass: {np.sum(mol.masses)}")
-        mol.masses = np.array([HeavyMasses[el] for el in mol.atomtype]).astype(np.float32)
+        mol.masses = np.array([HeavyMasses[el] for el in mol.atomtype]).astype(
+            np.float32
+        )
         print(f"New Molecule Mass: {np.sum(mol.masses)}")
-        
-    precision = precisionmap[args.precision]
 
-    print("Force terms: ", args.forceterms)
+    precision = precisionmap[args.precision]
+    # print("Force terms: ", args.forceterms)
     ff = ForceField.create(mol, args.forcefield)
     parameters = Parameters(
         ff, mol, args.forceterms, precision=precision, device=device
@@ -174,11 +177,21 @@ def setup(args, batch_comp=False):
         )
 
     system = System(mol.numAtoms, args.replicas, precision, device)
+    assert system.nreplicas == 1, "Currently only single replica supported due to NNPforces and system.dof computation. Multi-replica to be implemented."
     system.set_positions(mol.coords)
     system.set_box(mol.box)
-    system.set_velocities(
-        maxwell_boltzmann(parameters.masses, args.temperature, args.replicas)
-    )
+    if args.velocities_file is not None:
+        print(f"Loading initial velocities from {args.velocities_file}. Note: currently supported for single replica only.")
+        loaded_velocities = np.load(args.velocities_file)[:, :, -1:] # shape (N, 3, numFrames)
+        loaded_velocities = np.moveaxis(loaded_velocities, -1, 0)  # shape (numFrames, N, 3)
+        loaded_velocities *= 48.88821  # convert from Å/fs to internal units (Å / TU)
+        if loaded_velocities.shape != (args.replicas, mol.numAtoms, 3):
+            raise ValueError(f"Loaded velocities have shape {loaded_velocities.shape}, but expected {(args.replicas, mol.numAtoms, 3)}")
+        system.set_velocities(torch.tensor(loaded_velocities, dtype=precision, device=device))
+    else:
+        system.set_velocities(
+            maxwell_boltzmann(parameters.masses, args.temperature, args.replicas)
+        )
     if args.langevin_temperature is None: 
         # we assume NVE and COM momentum conservation if no thermostat is used
         # remove COM velocity
@@ -206,6 +219,7 @@ def setup(args, batch_comp=False):
             parameters,
             external=s_external,
             return_forces=args.return_forces,
+            integrate_neg_dy=True, # assuming this will be always conservative forces (from doh or classic mlip)
         )
         print("Multiple time step integration enabled.")
         
@@ -239,33 +253,39 @@ def dynamics(args, mol, system, forces, slow_forces, steps_done=None):
     outputname, outputext = os.path.splitext(args.output)
     logs = []
     trajs = []
-    #forces = []
+    # forces_list = []
+    velocities = []
+    ensemble_ext = 'nvt' if args.langevin_temperature is not None else 'nve'
     for k in range(args.replicas):
         logs.append(
             LogWriter(
                 args.log_dir,
                 keys=("iter", "ns", "epot", "ekin", "etot", "T"),
-                name=f"monitor_{k}.csv",
+                name=f"{ensemble_ext}_monitor_{k}.csv",
                 append=False if steps_done is None else True,
             )
         )
         trajs.append([])
-        #forces.append([])
+        # forces_list.append([])
+        velocities.append([])
+
         if steps_done is not None:
             resume_traj = np.load(os.path.join(args.log_dir, f"{outputname}_{k}{outputext}.npy"))
             #resume_force = np.load(os.path.join(args.log_dir, f"forces_{outputname}_{k}{outputext}.npy"))
             for frame_i in range(resume_traj.shape[2]):
                 trajs[k].append(list(resume_traj[:, :, frame_i]))
-                #forces.append(list(resume_force[:, :, frame_i]))
-                        
+                # forces_list.append(list(resume_force[:, :, frame_i]))
+                velocities[k].append(list(system.vel[k].cpu().numpy().copy()))
+
     if args.minimize != None:
-        minimize_bfgs(system, forces, steps=args.minimize)
+        minimize_bfgs(system, forces, steps=args.minimize, integrate_force=args.integrate_force)
 
     iterator = tqdm(range(1, int(args.steps / args.output_period) + 1))
-    Epot, forces = forces.compute(
+    # initial forces computed from the equivariant vector output head model
+    Epot, forces, _ = forces.compute(
         system.pos,
         system.box,
-        system.forces,
+        system.forces, # updated in place
         explicit_forces=args.explicit_forces,
         calculateForces=args.calculate_forces,
         toNumpy=False,
@@ -277,24 +297,36 @@ def dynamics(args, mol, system, forces, slow_forces, steps_done=None):
             continue 
         
         # viewFrame(mol, system.pos, system.forces)
-        Ekin, Epot, T = integrator.step(niter=args.output_period)
+        curr_step = (i - 1) * args.output_period
+        Ekin, Epot, T = integrator.step(niter=args.output_period, curr_step=curr_step)
         wrapper.wrap(system.pos, system.box)
         currpos = system.pos.detach().cpu().numpy().copy()
-        #currforces = system.forces.detach().cpu().numpy().copy()
+        # currforces = system.forces.detach().cpu().numpy().copy()
+        curr_vel = system.vel.detach().cpu().numpy().copy() # these are in internal units (Å / TU)
+        curr_vel /= 48.88821  # convert Å/AKMA=Å/(1/TIMEFACTOR) to Å/fs
         
         for k in range(args.replicas):
             trajs[k].append(currpos[k])
-            #forces[k].append(currforces[k])
+            # forces_list[k].append(currforces[k])
+            velocities[k].append(curr_vel[k])
             if (i * args.output_period) % args.save_period == 0:
                 np.save(
                     os.path.join(args.log_dir, f"{outputname}_{k}{outputext}"),
                     np.stack(trajs[k], axis=2),
                 )  # ideally we want to append
-                #np.save(
+                
+                # np.save(
                 #    os.path.join(args.log_dir, f"forces_{outputname}_{k}{outputext}"),
-                #    np.stack(forces[k], axis=2),
-                #)  # ideally we want to append
-            
+                #    np.stack(forces_list[k], axis=2),
+                # )  # ideally we want to append
+                
+                np.save(
+                    os.path.join(
+                        args.log_dir, f"velocities_{outputname}_{k}{outputext}"
+                    ),
+                    np.stack(velocities[k], axis=2),
+                )  # ideally we want to append
+
             update_dict = {
                 "iter": i * args.output_period,
                 "ns": FS2NS * i * args.output_period * args.timestep,
@@ -320,7 +352,7 @@ def dynamics(args, mol, system, forces, slow_forces, steps_done=None):
         mol = Molecule(args.structure)
         mol.coords = np.stack(trajs[k], axis=2).astype(np.float32)
         mol.write(os.path.join(args.log_dir, args.output + f"_{k}.xtc"))
-        if args.save_final_coords is not None:
+        if args.save_final_coords:
             mol.write(os.path.join(args.log_dir, args.output + f"_final_{k}.pdb"), frames=-1)
 
 
