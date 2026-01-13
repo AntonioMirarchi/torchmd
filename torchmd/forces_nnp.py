@@ -38,7 +38,7 @@ class NNPForces:
         pos,
         box,
         forces,
-        returnDetails=False,
+        returnDetails=True,
         toNumpy=True,
         calculateForces=True,
         # kept ONLY for API compatibility with callers using Forces.compute signature
@@ -51,15 +51,14 @@ class NNPForces:
         all_curl = torch.zeros((nsystems, self.natoms, 3), device=pos.device, dtype=pos.dtype)
 
         (y, pred_forces), curl = self.external.calculate(pos, box=None)
-
         is_conservative = not self.external.model.non_conservative
 
         if is_conservative:
             # y is energy per system (shape: [nsystems] or [nsystems, 1])
             pot[:] = y.reshape(-1)
         else:
-            # non-conservative: y is empty tensor
-            if getattr(self.external.model, "inference_curl", False):
+            if curl is not None:
+                curl = curl.unsqueeze(0) 
                 # expect y shape [nsystems, natoms, 3]
                 all_curl[:] = curl
 
@@ -82,5 +81,5 @@ class NNPForces:
             return pot_np, None
 
         if returnDetails:
-            return pot, all_curl
+            return pot, all_curl.detach().cpu().numpy()
         return pot, None

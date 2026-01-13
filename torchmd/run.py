@@ -321,9 +321,11 @@ def dynamics(args, mol, system, forces):
 
             logs[k].write_row(update_dict)
     if len(integrator.curl_storage) > 0:
+        curl_npy = np.concatenate(integrator.curl_storage, axis=0)
+        print(f"Saving curl data with shape: {curl_npy.shape}")
         np.save(
             os.path.join(args.log_dir, "curl_data.npy"),
-            integrator.curl_storage.cpu().numpy(),
+            curl_npy,
         )
     # new for on replicas because we start from .npy file saved in the previous step
     for k in range(args.replicas):
