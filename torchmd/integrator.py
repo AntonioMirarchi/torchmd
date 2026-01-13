@@ -79,7 +79,7 @@ PICOSEC2TIMEU = 1000.0 / TIMEFACTOR
 
 class Integrator:
     def __init__(
-        self, systems, forces, timestep, device, gamma=None, T=None, batch=None
+        self, systems, forces, timestep, device, gamma=None, T=None, batch=None, integrate_force=False
     ):
         self.dt = timestep / TIMEFACTOR
         self.systems = systems
@@ -108,13 +108,17 @@ class Integrator:
             self.natoms = torch.bincount(batch).cpu().numpy()
         else:
             self.natoms = len(self.masses)
+        
+        self.curl_storage = []
 
     def step(self, niter=1):
         systems = self.systems
 
         for _ in range(niter):
             _first_VV(systems.pos, systems.vel, systems.forces, self.masses, self.dt)
-            pot = self.forces.compute(systems.pos, systems.box, systems.forces)
+            pot, curl = self.forces.compute(systems.pos, systems.box, systems.forces)
+            if curl is not None:
+                self.curl_storage.append(curl)
             if self.T:
                 langevin(systems.vel, self.gamma, self.vcoeff, self.dt, self.device)
             _second_VV(systems.vel, systems.forces, self.masses, self.dt)

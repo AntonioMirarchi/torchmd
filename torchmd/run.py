@@ -15,7 +15,8 @@ from torchmd.integrator import maxwell_boltzmann
 from torchmd.utils import save_argparse, xyz_writer, LogWriter, LoadFromFile 
 from torchmd.minimizers import minimize_bfgs
 from torchmd.npzmol import npzMolecule
-
+from moleculekit.smallmol.smallmol import SmallMol
+from torchmd.forces_nnp import NNPForces
 FS2NS = 1e-6
 
 
@@ -127,7 +128,12 @@ def get_args(arguments=None):
     parser.add_argument(
         "--npz_file", default=None, type=str, help="Input file.npz with coord and z"
     )
-
+    parser.add_argument('--save-final-coords', default=None, type=str, help='Path to save the final coordinates of the simulation')
+    parser.add_argument('--integrate-force', default=False, help='If the integrator should integrate using directly forces from the forces module')
+    parser.add_argument('--return-forces', default=False, help='If the forces module should return directly forces instead of potential energy')
+    parser.add_argument('--explicit-forces', default=False, help='If True, it expects the potentials to return forces directly')
+    parser.add_argument('--calculate-forces', default=False, help='If True, compute the forces as derivative of the energy via autograd (explicit_forces needs to be True)')
+    parser.add_argument("--external-file", type=str, default=None, help="Override external.file")
     args = parser.parse_args(args=arguments)
     os.makedirs(args.log_dir, exist_ok=True)
     save_argparse(args, os.path.join(args.log_dir, "input.yaml"), exclude="conf")
@@ -157,6 +163,14 @@ def setup(args, batch_comp=False):
 
     if args.topology is not None:
         mol = Molecule(args.topology)
+        if args.topology.endswith(".sdf") or args.topology.endswith(".mol2"):
+            smol = SmallMol(args.topology)
+            mol = smol.toMolecule()
+        elif args.structure is not None:
+            mol = Molecule(args.structure)
+            mol.read(args.topology)  # for masses, atomtypes, bonds, etc.
+        else:
+            mol = Molecule(args.topology)
     elif args.structure is not None:
         mol = Molecule(args.structure)
         mol.box = (
@@ -197,6 +211,8 @@ def setup(args, batch_comp=False):
                     args.replicas, 1
                 )
 
+        if args.external_file is not None:
+            args.external["file"] = args.external_file # override external file if provided, useful for cmd line
         file = args.external["file"]
         # remove from args.external the items that have been already passed to the external module
         args.external = {
@@ -215,15 +231,31 @@ def setup(args, batch_comp=False):
         maxwell_boltzmann(parameters.masses, args.temperature, args.replicas)
     )
 
-    forces = Forces(
-        parameters,
-        terms=args.forceterms,
-        external=external,
-        cutoff=args.cutoff,
-        rfa=args.rfa,
-        switch_dist=args.switch_dist,
-        exclusions=args.exclusions,
-    )
+    if args.langevin_temperature is None: 
+        # we assume NVE and COM momentum conservation if no thermostat is used
+        # remove COM velocity
+        system.remove_com_velocity(parameters.masses)
+        # assert momentum conservation
+        p_xyz = (system.vel * parameters.masses.detach().clone().to(device=device)[None, :]) # (replicas, N, 3)
+        p = p_xyz.sum(dim=1)  # summing over atoms (replicas, 3)
+        p_tot = torch.linalg.norm(p, dim=-1)  # (replicas, )
+        print(f"Total momentum after removing COM velocity: {p_tot}") # should be close to zero
+
+    # forces = Forces(
+    #         parameters,
+    #         terms=args.forceterms,
+    #         external=external,
+    #         cutoff=args.cutoff,
+    #         rfa=args.rfa,
+    #         switch_dist=args.switch_dist,
+    #         exclusions=args.exclusions,
+    #         return_forces=args.return_forces,
+    #     )
+    
+    forces = NNPForces(
+            parameters,
+            external=external,
+        )
     return mol, system, forces
 
 
@@ -238,6 +270,7 @@ def dynamics(args, mol, system, forces):
         device,
         gamma=args.langevin_gamma,
         T=args.langevin_temperature,
+        integrate_force=args.integrate_force,
     )
     wrapper = Wrapper(mol.numAtoms, mol.bonds if len(mol.bonds) else None, device)
 
@@ -258,7 +291,10 @@ def dynamics(args, mol, system, forces):
         minimize_bfgs(system, forces, steps=args.minimize)
 
     iterator = tqdm(range(1, int(args.steps / args.output_period) + 1))
-    Epot = forces.compute(system.pos, system.box, system.forces)
+    Epot, _ = forces.compute(system.pos, system.box, system.forces,
+           explicit_forces=args.explicit_forces,
+           calculateForces=args.calculate_forces,
+           toNumpy=False,)
 
     for i in iterator:
         # viewFrame(mol, system.pos, system.forces)
@@ -272,23 +308,34 @@ def dynamics(args, mol, system, forces):
                     os.path.join(args.log_dir, f"{outputname}_{k}{outputext}"),
                     np.stack(trajs[k], axis=2),
                 )  # ideally we want to append
+            
+            update_dict = {
+                "iter": i * args.output_period,
+                "ns": FS2NS * i * args.output_period * args.timestep,
+                "ekin": Ekin[k],
+                "T": T[k],
+            }
+            if Epot is not None and len(Epot) > k:
+                update_dict["epot"] = Epot[k]
+                update_dict["etot"] = Ekin[k] + Epot[k]
 
-            logs[k].write_row(
-                {
-                    "iter": i * args.output_period,
-                    "ns": FS2NS * i * args.output_period * args.timestep,
-                    "epot": Epot[k],
-                    "ekin": Ekin[k],
-                    "etot": Epot[k] + Ekin[k],
-                    "T": T[k],
-                }
-            )
-
+            logs[k].write_row(update_dict)
+    if len(integrator.curl_storage) > 0:
+        np.save(
+            os.path.join(args.log_dir, "curl_data.npy"),
+            integrator.curl_storage.cpu().numpy(),
+        )
     # new for on replicas because we start from .npy file saved in the previous step
     for k in range(args.replicas):
         npy_name = os.path.join(args.log_dir, args.output + f"_{k}.npy")
         xyz_name = os.path.join(args.log_dir, args.output + f"_{k}.xyz")
         xyz_writer(npy_name, xyz_name, mol.element)
+        # write alsot the xtc file
+        mol = Molecule(args.structure)
+        mol.coords = np.stack(trajs[k], axis=2).astype(np.float32)
+        mol.write(os.path.join(args.log_dir, args.output + f"_{k}.xtc"))
+        if args.save_final_coords is not None:
+            mol.write(os.path.join(args.log_dir, args.output + f"_final_{k}.pdb"), frames=-1)
 
 
 if __name__ == "__main__":

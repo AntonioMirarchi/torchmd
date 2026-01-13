@@ -13,7 +13,8 @@ class System:
         self.vel = torch.zeros(nreplicas, natoms, 3)
         self.forces = torch.zeros(nreplicas, natoms, 3)
         self.masses = torch.zeros(natoms, 1)
-
+        self.dof = 3 * natoms  # default degrees of freedom
+        
         self.to_(device)
         self.precision_(precision)
 
@@ -96,3 +97,13 @@ class System:
         self.masses[:, 0] = (
             masses.clone().detach().type(self.masses.dtype).to(self.masses.device)
         )
+    def remove_com_velocity(self, masses):
+        # masses: np array of shape [natoms, 1]
+        total_mass = masses.sum()
+        # self.vel: [nreplicas, natoms, 3]
+        # (self.vel * masses[None, :]) -> [nreplicas, natoms, 3]
+        com_vel = (self.vel * masses[None, :]).sum(dim=1) / total_mass  # [nreplicas, 3]
+        self.vel -= com_vel[:, None, :]  # broadcast over atoms
+
+        # overwrite dof property to account for removed com velocity
+        self.dof = 3 * self.natoms - 3  # remove 3 dof for linear momentum conservation

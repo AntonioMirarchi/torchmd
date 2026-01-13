@@ -1,3 +1,12 @@
+'''
+Inside Forces.compute(...):
+    - calculateForces=False ⟶ it must not compute / modify forces, and it forces explicit_forces=False internally (so downstream terms don't add forces).
+    - calculateForces=True:
+        explicit_forces=True ⟶ forces are accumulated explicitly from each term.
+        explicit_forces=False ⟶ forces are computed at the end as -autograd.grad(total_energy, pos) and it requires pos.requires_grad=True (or it raises).
+
+Return value is energies only (optionally detailed energies); the forces tensor is an output buffer mutated in-place.
+'''
 from scipy import constants as const
 import torch
 import numpy as np
