@@ -6,6 +6,7 @@ from torchmd.forcefields.forcefield import ForceField
 from torchmd.parameters import Parameters
 from torchmd.forces import Forces
 from torchmd.integrator import Integrator
+# from torchmd.integrator_am import Integrator
 from torchmd.wrapper import Wrapper
 import numpy as np
 from tqdm import tqdm
@@ -18,7 +19,7 @@ from torchmd.npzmol import npzMolecule
 from moleculekit.smallmol.smallmol import SmallMol
 from torchmd.forces_nnp import NNPForces
 FS2NS = 1e-6
-
+from moleculekit.periodictable import periodictable
 
 def viewFrame(mol, pos, forces):
     from ffevaluation.ffevaluate import viewForces
@@ -134,6 +135,12 @@ def get_args(arguments=None):
     parser.add_argument('--explicit-forces', default=False, help='If True, it expects the potentials to return forces directly')
     parser.add_argument('--calculate-forces', default=False, help='If True, compute the forces as derivative of the energy via autograd (explicit_forces needs to be True)')
     parser.add_argument("--external-file", type=str, default=None, help="Override external.file")
+
+    # Langevin middle option
+    parser.add_argument("--use-langevin-middle",default=False, action="store_true", help="Use Langevin middle (BAOAB) scheme for Langevin dynamics")
+    parser.add_argument("--remove-com-vel", default=False, action="store_true", help="Remove center of mass velocity at each step")
+    parser.add_argument("--remove-torque", default=False, action="store_true", help="Remove net torque at each step")
+    
     args = parser.parse_args(args=arguments)
     os.makedirs(args.log_dir, exist_ok=True)
     save_argparse(args, os.path.join(args.log_dir, "input.yaml"), exclude="conf")
@@ -201,7 +208,7 @@ def setup(args, batch_comp=False):
         externalmodule = importlib.import_module(args.external["module"])
         if batch_comp:
             embeddings = torch.tensor(mol.embedding).repeat(args.replicas, 1)
-        else:
+        elif args.external["embeddings"] is not None:
             if isinstance(args.external["embeddings"], str):
                 embeddings = torch.tensor(
                     np.load(args.external["embeddings"]).astype(int)
@@ -210,6 +217,10 @@ def setup(args, batch_comp=False):
                 embeddings = torch.tensor(args.external["embeddings"]).repeat(
                     args.replicas, 1
                 )
+        else:
+            embeddings = torch.tensor([periodictable[el].number for el in mol.element]).repeat(args.replicas, 1)
+            print(f"emb.shape before repeat: {embeddings.shape}")
+            print("Using embeddings from the molecule:", embeddings)
 
         if args.external_file is not None:
             args.external["file"] = args.external_file # override external file if provided, useful for cmd line
@@ -271,6 +282,9 @@ def dynamics(args, mol, system, forces):
         gamma=args.langevin_gamma,
         T=args.langevin_temperature,
         integrate_force=args.integrate_force,
+        # remove_com=args.remove_com_vel, 
+        # remove_torque=args.remove_torque,
+        # langevin_middle=args.use_langevin_middle,
     )
     wrapper = Wrapper(mol.numAtoms, mol.bonds if len(mol.bonds) else None, device)
 
