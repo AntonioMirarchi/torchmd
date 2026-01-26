@@ -74,6 +74,12 @@ def langevin(vel, gamma, coeff, dt, device):
     vel += -gamma * vel * dt + csi
 
 
+def _unpack_compute_result(result):
+    if isinstance(result, tuple) and len(result) == 2:
+        return result
+    return result, None
+
+
 PICOSEC2TIMEU = 1000.0 / TIMEFACTOR
 
 
@@ -128,7 +134,7 @@ class Integrator:
             )
             self.masses = self.masses.view(-1, 1)
 
-        if T and gamma is not None:
+        if T is not None and gamma is not None:
             # Precompute coefficient for Euler–Maruyama noise (old scheme).  In
             # the middle-Langevin scheme the noise coefficients are computed
             # on-the-fly each step based on exp(-gamma*dt/2).
@@ -256,13 +262,18 @@ class Integrator:
             # friction coefficient is per unit time; dt in our units.  Compute
             # half-step factors for Ornstein–Uhlenbeck update.  Use dtype of
             # velocities.
-            gamma_dt_half = self.gamma * self.dt / 2.0
+            device = systems.vel.device
+            vel_dtype = systems.vel.dtype
+            gamma_dt_half = torch.as_tensor(
+                self.gamma * self.dt / 2.0, device=device, dtype=vel_dtype
+            )
             a = torch.exp(-gamma_dt_half)
             # noise coefficient b depends on masses and temperature.  Shape
             # (natoms,1).  We broadcast across replicas later.
-            b = torch.sqrt(
-                BOLTZMAN * self.T * (1.0 - a * a) / self.masses
-            ).to(self.device)
+            masses = self.masses.to(device=device, dtype=vel_dtype)
+            b = torch.sqrt(BOLTZMAN * self.T * (1.0 - a * a) / masses)
+            a_view = a.view(1, 1, 1)
+            b_view = b.view(1, -1, 1)
 
         for _ in range(niter):
             if self.gamma is not None and self.T is not None:
@@ -271,15 +282,15 @@ class Integrator:
                     # Generate random noise for the pre-force OU step
                     noise = torch.randn_like(systems.vel)
                     # Expand a and b to (nreplicas, natoms, 1)
-                    a_view = a.view(1, 1, 1)
-                    b_view = b.view(1, -1, 1)
                     systems.vel = a_view * systems.vel + b_view * noise
                     # Kick half-step with current forces
                     systems.vel += 0.5 * self.dt * systems.forces / self.masses
                     # Drift: update positions
                     systems.pos += self.dt * systems.vel
                     # Compute new forces and (optionally) curl
-                    pot, curl = self.forces.compute(systems.pos, systems.box, systems.forces)
+                    pot, curl = _unpack_compute_result(
+                        self.forces.compute(systems.pos, systems.box, systems.forces)
+                    )
                     if curl is not None:
                         self.curl_storage.append(curl)
                     # Remove rigid-body modes from forces if requested
@@ -293,7 +304,9 @@ class Integrator:
                 else:
                     # Euler–Maruyama Langevin update (previous implementation)
                     _first_VV(systems.pos, systems.vel, systems.forces, self.masses, self.dt)
-                    pot, curl = self.forces.compute(systems.pos, systems.box, systems.forces)
+                    pot, curl = _unpack_compute_result(
+                        self.forces.compute(systems.pos, systems.box, systems.forces)
+                    )
                     if curl is not None:
                         self.curl_storage.append(curl)
                     # Remove rigid-body modes if requested
@@ -305,7 +318,9 @@ class Integrator:
             else:
                 # Hamiltonian (velocity Verlet) integration
                 _first_VV(systems.pos, systems.vel, systems.forces, self.masses, self.dt)
-                pot, curl = self.forces.compute(systems.pos, systems.box, systems.forces)
+                pot, curl = _unpack_compute_result(
+                    self.forces.compute(systems.pos, systems.box, systems.forces)
+                )
                 if curl is not None:
                     self.curl_storage.append(curl)
                 # Remove rigid-body modes

@@ -74,6 +74,12 @@ def langevin(vel, gamma, coeff, dt, device):
     vel += -gamma * vel * dt + csi
 
 
+def _unpack_compute_result(result):
+    if isinstance(result, tuple) and len(result) == 2:
+        return result
+    return result, None
+
+
 PICOSEC2TIMEU = 1000.0 / TIMEFACTOR
 
 
@@ -98,7 +104,7 @@ class Integrator:
             )
             self.masses = self.masses.view(-1, 1)
 
-        if T:
+        if T is not None and gamma is not None:
             self.vcoeff = torch.sqrt(
                 2.0 * gamma / self.masses * BOLTZMAN * T * self.dt
             ).to(device)
@@ -116,10 +122,12 @@ class Integrator:
 
         for _ in range(niter):
             _first_VV(systems.pos, systems.vel, systems.forces, self.masses, self.dt)
-            pot, curl = self.forces.compute(systems.pos, systems.box, systems.forces)
+            pot, curl = _unpack_compute_result(
+                self.forces.compute(systems.pos, systems.box, systems.forces)
+            )
             if curl is not None:
                 self.curl_storage.append(curl)
-            if self.T:
+            if self.gamma is not None and self.T is not None:
                 langevin(systems.vel, self.gamma, self.vcoeff, self.dt, self.device)
             _second_VV(systems.vel, systems.forces, self.masses, self.dt)
 
