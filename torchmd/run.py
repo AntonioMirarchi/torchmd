@@ -12,7 +12,7 @@ import numpy as np
 from tqdm import tqdm
 import argparse
 import importlib
-from torchmd.integrator import maxwell_boltzmann
+from torchmd.integrator import maxwell_boltzmann, TIMEFACTOR
 from torchmd.utils import save_argparse, xyz_writer, LogWriter, LoadFromFile 
 from torchmd.minimizers import minimize_bfgs
 from torchmd.npzmol import npzMolecule
@@ -71,7 +71,7 @@ def get_args(arguments=None):
     parser.add_argument("--use-langevin-middle",default=False, action="store_true", help="Use Langevin middle (BAOAB) scheme for Langevin dynamics")
     parser.add_argument("--remove-com-vel", default=False, action="store_true", help="Remove center of mass velocity at each step")
     parser.add_argument("--remove-torque", default=False, action="store_true", help="Remove net torque at each step")
-    
+    parser.add_argument("--velocities-file", type=str, default=None, help="File from which to load initial velocities (.npy), otherwise sampled from MB distribution")
     args = parser.parse_args(args=arguments)
     os.makedirs(args.log_dir, exist_ok=True)
     save_argparse(args, os.path.join(args.log_dir, "input.yaml"), exclude="conf")
@@ -167,12 +167,21 @@ def setup(args, batch_comp=False):
         )
 
     system = System(mol.numAtoms, args.replicas, precision, device)
+    assert system.nreplicas == 1, "Currently only single replica supported due to NNPforces and system.dof computation. Multi-replica to be implemented."
     system.set_positions(mol.coords)
     system.set_box(mol.box)
-    system.set_velocities(
-        maxwell_boltzmann(parameters.masses, args.temperature, args.replicas)
-    )
-
+    if args.velocities_file is not None:
+        print(f"Loading initial velocities from {args.velocities_file}. Note: currently supported for single replica only.")
+        loaded_velocities = np.load(args.velocities_file)[:, :, -1:] # shape (N, 3, numFrames)
+        loaded_velocities = np.moveaxis(loaded_velocities, -1, 0)  # shape (numFrames, N, 3)
+        loaded_velocities *= TIMEFACTOR  # Å/fs -> internal units (Å/TU), with 1 TU = TIMEFACTOR fs
+        if loaded_velocities.shape != (args.replicas, mol.numAtoms, 3):
+            raise ValueError(f"Loaded velocities have shape {loaded_velocities.shape}, but expected {(args.replicas, mol.numAtoms, 3)}")
+        system.set_velocities(torch.tensor(loaded_velocities, dtype=precision, device=device))
+    else:
+        system.set_velocities(
+            maxwell_boltzmann(parameters.masses, args.temperature, args.replicas)
+        )
     if args.langevin_temperature is None: 
         # we assume NVE and COM momentum conservation if no thermostat is used
         # remove COM velocity
@@ -220,17 +229,22 @@ def dynamics(args, mol, system, forces):
     wrapper = Wrapper(mol.numAtoms, mol.bonds if len(mol.bonds) else None, device)
 
     outputname, outputext = os.path.splitext(args.output)
-    trajs = []
     logs = []
+    trajs = []
+    # forces_list = []
+    velocities = []
+    ensemble_ext = 'nvt' if args.langevin_temperature is not None else 'nve'
     for k in range(args.replicas):
         logs.append(
             LogWriter(
                 args.log_dir,
                 keys=("iter", "ns", "epot", "ekin", "etot", "T"),
-                name=f"monitor_{k}.csv",
+                name=f"{ensemble_ext}_monitor_{k}.csv",
             )
         )
         trajs.append([])
+        velocities.append([])
+        # forces_list.append([])
 
     if args.minimize != None:
         minimize_bfgs(system, forces, steps=args.minimize)
@@ -246,14 +260,34 @@ def dynamics(args, mol, system, forces):
         Ekin, Epot, T = integrator.step(niter=args.output_period)
         wrapper.wrap(system.pos, system.box)
         currpos = system.pos.detach().cpu().numpy().copy()
+        # currforces = system.forces.detach().cpu().numpy().copy()
+
+        curr_vel = system.vel.detach().cpu().numpy().copy()  # internal units (Å/TU)
+        curr_vel /= TIMEFACTOR  # Å/TU -> Å/fs
+
         for k in range(args.replicas):
             trajs[k].append(currpos[k])
+            velocities[k].append(curr_vel[k])
+            # forces_list[k].append(currforces[k])
+            
             if (i * args.output_period) % args.save_period == 0:
                 np.save(
                     os.path.join(args.log_dir, f"{outputname}_{k}{outputext}"),
                     np.stack(trajs[k], axis=2),
                 )  # ideally we want to append
-            
+                
+                # np.save(
+                #    os.path.join(args.log_dir, f"forces_{outputname}_{k}{outputext}"),
+                #    np.stack(forces_list[k], axis=2),
+                # )  # ideally we want to append
+                
+                np.save(
+                    os.path.join(
+                        args.log_dir, f"velocities_{outputname}_{k}{outputext}"
+                    ),
+                    np.stack(velocities[k], axis=2),
+                )  # ideally we want to append
+
             update_dict = {
                 "iter": i * args.output_period,
                 "ns": FS2NS * i * args.output_period * args.timestep,
