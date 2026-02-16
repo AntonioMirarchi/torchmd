@@ -162,12 +162,13 @@ def setup(args, batch_comp=False):
             for key, value in args.external.items()
             if key not in ["module", "file", "embeddings"]
         }
-        external = externalmodule.External(
-            file, embeddings, device=device, **args.external
+        # nAtoms is used to define the compile setting
+        # If we do not consider the nReplicas in the nAtoms, then we are under-estimating the computational cost of the system,
+        # which can lead to OOM errors because the external module might allocate tensors of size (nAtoms,) or (nAtoms, 3) without considering replicas
+        external = externalmodule.CompileExternal(
+            file, embeddings, device=device, nAtoms=mol.numAtoms * mol.numFrames , **args.external
         )
-
     system = System(mol.numAtoms, args.replicas, precision, device)
-    assert system.nreplicas == 1, "Currently only single replica supported due to NNPforces and system.dof computation. Multi-replica to be implemented."
     system.set_positions(mol.coords)
     system.set_box(mol.box)
     if args.velocities_file is not None:
