@@ -49,7 +49,7 @@ class NNPForces:
         pot = torch.zeros(nsystems, device=pos.device, dtype=pos.dtype)
         all_curl = torch.zeros((nsystems, self.natoms, 3), device=pos.device, dtype=pos.dtype)
         curl_computed = False
-        (y, pred_forces), curl = self.external.calculate(pos, box=None)
+        (y, pred_forces), curl = self.external.calculate(pos, box=box)
         is_conservative = not self.external.model.non_conservative
 
         if is_conservative:
@@ -57,10 +57,21 @@ class NNPForces:
             pot[:] = y.reshape(-1)
 
         if curl.numel() > 0:
-                curl = curl.unsqueeze(0) 
-                # expect y shape [nsystems, natoms, 3]
-                all_curl[:] = curl
-                curl_computed = True
+            if curl.dim() == 2:
+                # Single-system curl returned as [natoms, 3]
+                curl = curl.unsqueeze(0)
+            elif curl.dim() != 3:
+                raise RuntimeError(
+                    f"MLIP curl has unexpected shape {tuple(curl.shape)}; "
+                    "expected [nsystems, natoms, 3] or [natoms, 3]."
+                )
+            if curl.shape[0] != nsystems or curl.shape[1] != self.natoms or curl.shape[2] != 3:
+                raise RuntimeError(
+                    f"MLIP curl shape {tuple(curl.shape)} does not match "
+                    f"(nsystems={nsystems}, natoms={self.natoms}, 3)."
+                )
+            all_curl[:] = curl
+            curl_computed = True
 
         # Only touch the force output buffer if requested
         if calculateForces and (forces is not None):
@@ -69,6 +80,11 @@ class NNPForces:
                 raise RuntimeError(
                     "MLIP did not return forces (empty `vec`) but calculateForces=True. "
                     "Enable force output in the MLIP or set calculateForces=False."
+                )
+            if pred_forces.shape != forces.shape:
+                raise RuntimeError(
+                    f"MLIP forces shape {tuple(pred_forces.shape)} does not match "
+                    f"forces buffer shape {tuple(forces.shape)}."
                 )
             forces.zero_()
             forces[:] = pred_forces
