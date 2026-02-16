@@ -233,7 +233,7 @@ def dynamics(args, mol, system, forces):
     logs = []
     trajs = []
     # forces_list = []
-    velocities = []
+    # velocities = []
     ensemble_ext = 'nvt' if args.langevin_temperature is not None else 'nve'
     for k in range(args.replicas):
         logs.append(
@@ -244,7 +244,7 @@ def dynamics(args, mol, system, forces):
             )
         )
         trajs.append([])
-        velocities.append([])
+        # velocities.append([])
         # forces_list.append([])
 
     if args.minimize != None:
@@ -268,7 +268,7 @@ def dynamics(args, mol, system, forces):
 
         for k in range(args.replicas):
             trajs[k].append(currpos[k])
-            velocities[k].append(curr_vel[k])
+            # velocities[k].append(curr_vel[k])
             # forces_list[k].append(currforces[k])
             
             if (i * args.output_period) % args.save_period == 0:
@@ -282,12 +282,13 @@ def dynamics(args, mol, system, forces):
                 #    np.stack(forces_list[k], axis=2),
                 # )  # ideally we want to append
                 
-                np.save(
-                    os.path.join(
-                        args.log_dir, f"velocities_{outputname}_{k}{outputext}"
-                    ),
-                    np.stack(velocities[k], axis=2),
-                )  # ideally we want to append
+                # np.save(
+                #     os.path.join(
+                #         args.log_dir, f"velocities_{outputname}_{k}{outputext}"
+                #     ),
+                #     np.stack(velocities[k], axis=2),
+                # )  # ideally we want to append
+                
 
             update_dict = {
                 "iter": i * args.output_period,
