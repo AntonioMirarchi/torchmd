@@ -61,8 +61,6 @@ def get_args(arguments=None):
     parser.add_argument("--npz_file", default=None, type=str, help="Input file.npz with coord and z")
     parser.add_argument('--save-final-coords', default=False, type=bool, help='If True, save final coordinates to a pdb file')
     # new args
-    parser.add_argument('--integrate-force', default=False, help='If the integrator should integrate using directly forces from the forces module')
-    parser.add_argument('--return-forces', default=False, help='If the forces module should return directly forces instead of potential energy')
     parser.add_argument('--explicit-forces', default=False, help='If True, it expects the potentials to return forces directly')
     parser.add_argument('--calculate-forces', default=False, help='If True, compute the forces as derivative of the energy via autograd (explicit_forces needs to be True)')
     parser.add_argument("--external-file", type=str, default=None, help="Override external.file")
@@ -192,17 +190,6 @@ def setup(args, batch_comp=False):
         p = p_xyz.sum(dim=1)  # summing over atoms (replicas, 3)
         p_tot = torch.linalg.norm(p, dim=-1)  # (replicas, )
         print(f"Total momentum after removing COM velocity: {p_tot}") # should be close to zero
-
-    # forces = Forces(
-    #         parameters,
-    #         terms=args.forceterms,
-    #         external=external,
-    #         cutoff=args.cutoff,
-    #         rfa=args.rfa,
-    #         switch_dist=args.switch_dist,
-    #         exclusions=args.exclusions,
-    #         return_forces=args.return_forces,
-    #     )
     
     forces = NNPForces(
             parameters,
