@@ -66,7 +66,7 @@ def get_args(arguments=None):
     parser.add_argument('--explicit-forces', default=False, help='If True, it expects the potentials to return forces directly')
     parser.add_argument('--calculate-forces', default=False, help='If True, compute the forces as derivative of the energy via autograd (explicit_forces needs to be True)')
     parser.add_argument("--external-file", type=str, default=None, help="Override external.file")
-
+    parser.add_argument("--save-xtc", default=False, action="store_true", help="Whether to save the trajectory also in xtc format (in addition to npy and xyz)")
     # Langevin middle option
     parser.add_argument("--use-langevin-middle",default=False, action="store_true", help="Use Langevin middle (BAOAB) scheme for Langevin dynamics")
     parser.add_argument("--remove-com-vel", default=False, action="store_true", help="Remove center of mass velocity at each step")
@@ -313,10 +313,12 @@ def dynamics(args, mol, system, forces):
         npy_name = os.path.join(args.log_dir, args.output + f"_{k}.npy")
         xyz_name = os.path.join(args.log_dir, args.output + f"_{k}.xyz")
         xyz_writer(npy_name, xyz_name, mol.element)
-        # write alsot the xtc file
-        mol = Molecule(args.structure)
-        mol.coords = np.stack(trajs[k], axis=2).astype(np.float32)
-        mol.write(os.path.join(args.log_dir, args.output + f"_{k}.xtc"))
+        
+        if args.save_xtc:
+            # write alsot the xtc file
+            mol = Molecule(args.structure)
+            mol.coords = np.stack(trajs[k], axis=2).astype(np.float32)
+            mol.write(os.path.join(args.log_dir, args.output + f"_{k}.xtc"))
         if args.save_final_coords is not None:
             mol.write(os.path.join(args.log_dir, args.output + f"_final_{k}.pdb"), frames=-1)
 
