@@ -194,6 +194,8 @@ def setup(args, batch_comp=False):
     forces = NNPForces(
             parameters,
             external=external,
+            explicit_forces=args.explicit_forces,
+            calculateForces=args.calculate_forces,
         )
     return mol, system, forces
 
@@ -209,7 +211,6 @@ def dynamics(args, mol, system, forces):
         device,
         gamma=args.langevin_gamma,
         T=args.langevin_temperature,
-        integrate_force=args.integrate_force,
         # remove_com=args.remove_com_vel, 
         # remove_torque=args.remove_torque,
         # langevin_middle=args.use_langevin_middle,
@@ -238,10 +239,7 @@ def dynamics(args, mol, system, forces):
         minimize_bfgs(system, forces, steps=args.minimize)
 
     iterator = tqdm(range(1, int(args.steps / args.output_period) + 1))
-    Epot, _ = forces.compute(system.pos, system.box, system.forces,
-           explicit_forces=args.explicit_forces,
-           calculateForces=args.calculate_forces,
-           toNumpy=False,)
+    Epot = forces.compute(system.pos, system.box, system.forces, toNumpy=False,)
 
     for i in iterator:
         # viewFrame(mol, system.pos, system.forces)
@@ -288,13 +286,7 @@ def dynamics(args, mol, system, forces):
                 update_dict["etot"] = Ekin[k] + Epot[k]
 
             logs[k].write_row(update_dict)
-    if len(integrator.curl_storage) > 0:
-        curl_npy = np.concatenate(integrator.curl_storage, axis=0)
-        print(f"Saving curl data with shape: {curl_npy.shape}")
-        np.save(
-            os.path.join(args.log_dir, "curl_data.npy"),
-            curl_npy,
-        )
+
     # new for on replicas because we start from .npy file saved in the previous step
     for k in range(args.replicas):
         npy_name = os.path.join(args.log_dir, args.output + f"_{k}.npy")

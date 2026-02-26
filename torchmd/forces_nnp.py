@@ -24,7 +24,12 @@ class NNPForces:
       - curl: np.ndarray of shape (nsystems, natoms, 3) if computed, else None
     """
 
-    def __init__(self, parameters, external=None):
+    def __init__(self, 
+                parameters, 
+                external=None,
+                calculateForces=True, # (need explicit_forces false) and the pos to requires_grad to True
+                explicit_forces=None, # This means that the external MLIP is expected to return forces
+):
         assert external is not None, (
             "An external MLIP must be provided for NNPForces. "
             "Otherwise use the standard Forces class."
@@ -32,6 +37,8 @@ class NNPForces:
         self.par = parameters
         self.natoms = len(parameters.masses)
         self.external = external
+        self.calculateForces = calculateForces
+        self.explicit_forces = explicit_forces
 
     def compute(
         self,
@@ -39,63 +46,50 @@ class NNPForces:
         box,
         forces,
         toNumpy=True,
-        calculateForces=True,
-        # kept ONLY for API compatibility with callers using Forces.compute signature
-        # (ignored in MLIP-only pathway)
-        explicit_forces=None,
     ):
+        if self.calculateForces:
+            if not self.explicit_forces and not pos.requires_grad:
+                raise RuntimeError(
+                    "The positions passed don't require gradients. Please use pos.detach().requires_grad_(True) before passing."
+                )
+        else:
+            self.explicit_forces = False
         nsystems = pos.shape[0]
 
         pot = torch.zeros(nsystems, device=pos.device, dtype=pos.dtype)
-        all_curl = torch.zeros((nsystems, self.natoms, 3), device=pos.device, dtype=pos.dtype)
-        curl_computed = False
-        (y, pred_forces), curl = self.external.calculate(pos, box=box)
+
+        ext_ene, ext_force = self.external.calculate(pos, box=box)
         is_conservative = not self.external.model.non_conservative
 
         if is_conservative:
-            # y is energy per system (shape: [nsystems] or [nsystems, 1])
-            pot[:] = y.reshape(-1)
+            # ext_ene is energy per system (shape: [nsystems] or [nsystems, 1])
+            pot[:] = ext_ene.reshape(-1)
+            
+            if not self.explicit_forces and self.calculateForces:
+                # Compute forces via autograd if not explicitly provided by the MLIP.
+                # This is only valid for conservative models.
+                ext_force = -torch.autograd.grad(pot.sum(), pos, retain_graph=True)[0]
 
-        if curl.numel() > 0:
-            if curl.dim() == 2:
-                # Single-system curl returned as [natoms, 3]
-                curl = curl.unsqueeze(0)
-            elif curl.dim() != 3:
-                raise RuntimeError(
-                    f"MLIP curl has unexpected shape {tuple(curl.shape)}; "
-                    "expected [nsystems, natoms, 3] or [natoms, 3]."
-                )
-            if curl.shape[0] != nsystems or curl.shape[1] != self.natoms or curl.shape[2] != 3:
-                raise RuntimeError(
-                    f"MLIP curl shape {tuple(curl.shape)} does not match "
-                    f"(nsystems={nsystems}, natoms={self.natoms}, 3)."
-                )
-            all_curl[:] = curl
-            curl_computed = True
-
-        # Only touch the force output buffer if requested
-        if calculateForces and (forces is not None):
-            # MLIP forces must come from vec in the MLIP-only setup.
-            if pred_forces is None or (hasattr(pred_forces, "numel") and pred_forces.numel() == 0):
-                raise RuntimeError(
-                    "MLIP did not return forces (empty `vec`) but calculateForces=True. "
-                    "Enable force output in the MLIP or set calculateForces=False."
-                )
-            if pred_forces.shape != forces.shape:
-                raise RuntimeError(
-                    f"MLIP forces shape {tuple(pred_forces.shape)} does not match "
-                    f"forces buffer shape {tuple(forces.shape)}."
-                )
-            forces.zero_()
-            forces[:] = pred_forces
+        
+        # MLIP forces must come from vec in the MLIP-only setup.
+        if ext_force is None or (hasattr(ext_force, "numel") and ext_force.numel() == 0):
+            raise RuntimeError(
+                "MLIP did not return forces (empty `vec`) but calculateForces=True. "
+                "Enable force output in the MLIP or set calculateForces=False."
+            )
+        if ext_force.shape != forces.shape:
+            raise RuntimeError(
+                f"MLIP forces shape {tuple(ext_force.shape)} does not match "
+                f"forces buffer shape {tuple(forces.shape)}."
+            )
+         
+        # Update the forces buffer in-place with the MLIP forces.   
+        forces.zero_()
+        forces[:] = ext_force
 
         # Return energies (and optional details) only.
         if toNumpy:
             pot_np = pot.detach().cpu().numpy()
-            if curl_computed:
-                return pot_np, all_curl.detach().cpu().numpy()
-            return pot_np, None
+            return pot_np
 
-        if curl_computed:
-            return pot, all_curl.detach().cpu().numpy()
-        return pot, None
+        return pot

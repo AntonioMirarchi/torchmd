@@ -74,18 +74,12 @@ def langevin(vel, gamma, coeff, dt, device):
     vel += -gamma * vel * dt + csi
 
 
-def _unpack_compute_result(result):
-    if isinstance(result, tuple) and len(result) == 2:
-        return result
-    return result, None
-
-
 PICOSEC2TIMEU = 1000.0 / TIMEFACTOR
 
 
 class Integrator:
     def __init__(
-        self, systems, forces, timestep, device, gamma=None, T=None, batch=None, integrate_force=False
+        self, systems, forces, timestep, device, gamma=None, T=None, batch=None,
     ):
         self.dt = timestep / TIMEFACTOR
         self.systems = systems
@@ -122,11 +116,9 @@ class Integrator:
 
         for _ in range(niter):
             _first_VV(systems.pos, systems.vel, systems.forces, self.masses, self.dt)
-            pot, curl = _unpack_compute_result(
-                self.forces.compute(systems.pos, systems.box, systems.forces)
-            )
-            if curl is not None:
-                self.curl_storage.append(curl)
+            # system forces are updated in-place
+            pot = self.forces.compute(systems.pos, systems.box, systems.forces)
+            
             if self.gamma is not None and self.T is not None:
                 langevin(systems.vel, self.gamma, self.vcoeff, self.dt, self.device)
             _second_VV(systems.vel, systems.forces, self.masses, self.dt)
