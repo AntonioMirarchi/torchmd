@@ -92,10 +92,8 @@ class Integrator:
         if torch.any(systems.masses != 0):
             self.masses = systems.masses
         else:
-            self.masses = self.forces.par.masses
-            self.masses = torch.tensor(
-                self.masses, device=device, dtype=systems.pos.dtype
-            )
+            self.masses = self.forces.par.masses # alrady torch.tensor, just ensure dtype and device
+            self.masses = self.masses.detach().clone().to(device=device, dtype=systems.pos.dtype)
             self.masses = self.masses.view(-1, 1)
 
         if T is not None and gamma is not None:
