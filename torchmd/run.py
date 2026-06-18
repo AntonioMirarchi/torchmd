@@ -1,5 +1,6 @@
 import os
 import torch
+import warnings
 from torchmd.systems import System
 from moleculekit.molecule import Molecule
 from torchmd.forcefields.forcefield import ForceField
@@ -163,7 +164,11 @@ def setup(args, batch_comp=False):
         )
     system = System(mol.numAtoms, args.replicas, precision, device)
     system.set_positions(mol.coords)
-    system.set_box(mol.box)
+    warnings.warn(
+        "Periodic box handling is disabled in this repository. run.py will ignore input box data and the external model/compiler will always receive box=None.",
+        stacklevel=2,
+    )
+    # system.set_box(mol.box)
     if args.velocities_file is not None:
         print(f"Loading initial velocities from {args.velocities_file}. Note: currently supported for single replica only.")
         loaded_velocities = np.load(args.velocities_file)[:, :, -1:] # shape (N, 3, numFrames)

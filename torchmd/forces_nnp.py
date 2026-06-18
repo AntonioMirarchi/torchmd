@@ -58,7 +58,7 @@ class NNPForces:
 
         pot = torch.zeros(nsystems, device=pos.device, dtype=pos.dtype)
 
-        ext_ene, ext_force = self.external.calculate(pos, box=box)
+        ext_ene, ext_force = self.external.calculate(pos, box=None) #box=box)
         is_conservative = not self.external.model.non_conservative
 
         if is_conservative:
