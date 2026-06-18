@@ -66,6 +66,12 @@ def get_args(arguments=None):
     parser.add_argument("--external-file", type=str, default=None, help="Override external.file")
     parser.add_argument("--save-xtc", default=False, action="store_true", help="Whether to save the trajectory also in xtc format (in addition to npy and xyz)")
     parser.add_argument("--velocities-file", type=str, default=None, help="File from which to load initial velocities (.npy), otherwise sampled from MB distribution")
+    parser.add_argument("--to-constraint-harmonic", type=str, default=None, help="Path to a numpy array of atom indices for harmonic positional restraints")
+    parser.add_argument("--k-harmonic", type=float, default=1.0, help="Harmonic restraint force constant in kcal/mol/A^2")
+    parser.add_argument("--to-constraint-flat-bottom-box", nargs=3, type=float, default=None, help="Flat-bottom box full widths in Angstrom")
+    parser.add_argument("--k-flat-bottom", type=float, default=0.1, help="Flat-bottom restraint force constant in kcal/mol/A^2")
+    parser.add_argument("--pocket-idxs", type=str, default=None, help="Path to a numpy array of pocket atom indices for the flat-bottom restraint")
+    parser.add_argument("--c7-index", type=int, default=None, help="Ligand C7 atom index for the flat-bottom restraint")
     parser.add_argument("--charge", type=str, default=None, help="Total molecular charge passed to the external NNP. Can be a scalar or a .npy file with one value or one value per replica.")
     args = parser.parse_args(args=arguments)
     os.makedirs(args.log_dir, exist_ok=True)
@@ -131,6 +137,17 @@ def setup(args, batch_comp=False):
 
     external = None
     if args.external is not None:
+        needs_restraints = any(
+            value is not None
+            for value in (
+                args.to_constraint_harmonic,
+                args.to_constraint_flat_bottom_box,
+                args.pocket_idxs,
+                args.c7_index,
+            )
+        )
+        if needs_restraints:
+            args.external["module"] = "torchmd.restraint_external"
         externalmodule = importlib.import_module(args.external["module"])
         if batch_comp:
             embeddings = torch.tensor(mol.embedding).repeat(args.replicas, 1)
@@ -166,6 +183,12 @@ def setup(args, batch_comp=False):
             for key, value in args.external.items()
             if key not in ["module", "file", "embeddings"]
         }
+        args.external["to_constraint_harmonic"] = args.to_constraint_harmonic
+        args.external["k_harmonic"] = args.k_harmonic
+        args.external["to_constraint_flat_bottom_box"] = args.to_constraint_flat_bottom_box
+        args.external["k_flat_bottom"] = args.k_flat_bottom
+        args.external["pocket_idxs"] = args.pocket_idxs
+        args.external["c7_index"] = args.c7_index
         args.external["charge"] = charge
         # nAtoms is used to define the compile setting
         # If we do not consider the nReplicas in the nAtoms, then we are under-estimating the computational cost of the system,
