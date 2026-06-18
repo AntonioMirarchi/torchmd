@@ -66,6 +66,7 @@ def get_args(arguments=None):
     parser.add_argument("--external-file", type=str, default=None, help="Override external.file")
     parser.add_argument("--save-xtc", default=False, action="store_true", help="Whether to save the trajectory also in xtc format (in addition to npy and xyz)")
     parser.add_argument("--velocities-file", type=str, default=None, help="File from which to load initial velocities (.npy), otherwise sampled from MB distribution")
+    parser.add_argument("--charge", type=str, default=None, help="Total molecular charge passed to the external NNP. Can be a scalar or a .npy file with one value or one value per replica.")
     args = parser.parse_args(args=arguments)
     os.makedirs(args.log_dir, exist_ok=True)
     save_argparse(args, os.path.join(args.log_dir, "input.yaml"), exclude="conf")
@@ -147,6 +148,15 @@ def setup(args, batch_comp=False):
             print(f"emb.shape before repeat: {embeddings.shape}")
             print("Using embeddings from the molecule:", embeddings)
 
+        charge = None
+        if args.charge is not None:
+            try:
+                charge = float(args.charge)
+            except ValueError:
+                charge = np.load(args.charge)
+        elif hasattr(mol, "charge") and mol.charge is not None:
+            charge = float(np.asarray(mol.charge, dtype=np.float64).sum())
+
         if args.external_file is not None:
             args.external["file"] = args.external_file # override external file if provided, useful for cmd line
         file = args.external["file"]
@@ -156,6 +166,7 @@ def setup(args, batch_comp=False):
             for key, value in args.external.items()
             if key not in ["module", "file", "embeddings"]
         }
+        args.external["charge"] = charge
         # nAtoms is used to define the compile setting
         # If we do not consider the nReplicas in the nAtoms, then we are under-estimating the computational cost of the system,
         # which can lead to OOM errors because the external module might allocate tensors of size (nAtoms,) or (nAtoms, 3) without considering replicas
