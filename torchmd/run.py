@@ -6,7 +6,6 @@ from torchmd.forcefields.forcefield import ForceField
 from torchmd.parameters import Parameters
 from torchmd.forces import Forces
 from torchmd.integrator import Integrator
-# from torchmd.integrator_am import Integrator
 from torchmd.wrapper import Wrapper
 import numpy as np
 from tqdm import tqdm
@@ -65,10 +64,6 @@ def get_args(arguments=None):
     parser.add_argument('--calculate-forces', default=False, help='If True, compute the forces as derivative of the energy via autograd (explicit_forces needs to be True)')
     parser.add_argument("--external-file", type=str, default=None, help="Override external.file")
     parser.add_argument("--save-xtc", default=False, action="store_true", help="Whether to save the trajectory also in xtc format (in addition to npy and xyz)")
-    # Langevin middle option
-    parser.add_argument("--use-langevin-middle",default=False, action="store_true", help="Use Langevin middle (BAOAB) scheme for Langevin dynamics")
-    parser.add_argument("--remove-com-vel", default=False, action="store_true", help="Remove center of mass velocity at each step")
-    parser.add_argument("--remove-torque", default=False, action="store_true", help="Remove net torque at each step")
     parser.add_argument("--velocities-file", type=str, default=None, help="File from which to load initial velocities (.npy), otherwise sampled from MB distribution")
     args = parser.parse_args(args=arguments)
     os.makedirs(args.log_dir, exist_ok=True)
@@ -211,9 +206,6 @@ def dynamics(args, mol, system, forces):
         device,
         gamma=args.langevin_gamma,
         T=args.langevin_temperature,
-        # remove_com=args.remove_com_vel, 
-        # remove_torque=args.remove_torque,
-        # langevin_middle=args.use_langevin_middle,
     )
     wrapper = Wrapper(mol.numAtoms, mol.bonds if len(mol.bonds) else None, device)
 
