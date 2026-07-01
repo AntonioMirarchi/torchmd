@@ -79,16 +79,51 @@ PICOSEC2TIMEU = 1000.0 / TIMEFACTOR
 
 
 class Integrator:
-    """Velocity-Verlet NVE and BAOAB (Langevin-middle) NVT integrator.
+    """Velocity-Verlet NVE and LFMiddle NVT integrator.
 
     ``systems.forces`` must contain the force at ``systems.pos`` on entry to
     :meth:`step`. After every iteration it contains the force at the updated
-    positions. Velocities are stored at integer time, not at a staggered
-    half-step.
+    positions.
 
-    NVE applies ``B(dt/2) A(dt) B(dt/2)``. NVT applies the symmetric
-    Langevin-middle/BAOAB splitting
-    ``B(dt/2) A(dt/2) O(dt) A(dt/2) B(dt/2)``.
+    NVE uses on-step velocities and applies velocity Verlet,
+    ``V(dt/2) R(dt) V(dt/2)``.
+
+    NVT uses the LFMiddle discretization implemented by OpenMM's
+    ``LangevinMiddleIntegrator``::
+
+        V(dt) R(dt/2) O(dt) R(dt/2)
+
+    Here ``V`` is the force kick, ``R`` is the position drift, and ``O`` is
+    the exact Ornstein--Uhlenbeck thermostat update. NVT velocities are stored
+    half a time step behind the positions. On the first call to :meth:`step`,
+    an input on-step velocity is shifted from ``v(t)`` to ``v(t-dt/2)``.
+    Subsequent calls preserve the staggered convention.
+
+    Why LFMiddle
+    ------------
+    The previous NVT implementation used the cyclically equivalent
+    velocity-Verlet/BAOAB ordering ``V R O R V`` and exposed the velocity
+    between its two force half-kicks. That produces accurate configurational
+    sampling but a downward-biased kinetic temperature for stiff modes at
+    finite time step. OpenMM issue #2532 documents the same behavior and PR
+    #2561 changed OpenMM to LFMiddle so that the exposed half-step velocities
+    have a substantially more accurate momentum distribution:
+
+    * https://github.com/openmm/openmm/issues/2532
+    * https://github.com/openmm/openmm/pull/2561
+
+    A matched 20--60 ps timestep scan of the A3D TensorNet2 NNP at a 350 K
+    target produced::
+
+        timestep (fs)    mean reported T (K)
+             1                 349.99
+             2                 341.03
+             4                 314.30
+
+    The deficit followed the expected leading ``dt**2`` bias of the exposed
+    BAOAB on-step velocity. LFMiddle retains the same repeating propagation
+    operators while moving the step boundary to expose the physical leapfrog
+    velocity used for kinetic-energy and temperature reporting.
     """
 
     def __init__(
@@ -133,6 +168,9 @@ class Integrator:
                 * T
                 / self.masses
             ).to(device=device, dtype=systems.vel.dtype)
+        # Maxwell-Boltzmann initialization and loaded velocity files provide
+        # on-step velocities. LFMiddle persists velocities at t-dt/2 instead.
+        self._velocities_staggered = False
         self.batch = batch
         if batch is not None:
             # number of atoms per batch
@@ -145,30 +183,39 @@ class Integrator:
             raise ValueError(f"niter must be at least 1, got {niter}")
         systems = self.systems
 
-        for _ in range(niter):
-            if self.gamma is not None and self.T is not None:
-                # B(dt/2): first force half-kick.
+        if self.gamma is not None and self.T is not None:
+            if not self._velocities_staggered:
+                # Convert the supplied on-step v(t) to the leapfrog state
+                # v(t-dt/2). The following full kick then produces
+                # v(t+dt/2) before the first drift.
                 _kick(
                     systems.vel,
                     systems.forces,
                     self.masses,
-                    0.5 * self.dt,
+                    -0.5 * self.dt,
+                )
+                self._velocities_staggered = True
+
+        for _ in range(niter):
+            if self.gamma is not None and self.T is not None:
+                # V(dt): leapfrog force update
+                # v(t-dt/2) -> v(t+dt/2).
+                _kick(
+                    systems.vel,
+                    systems.forces,
+                    self.masses,
+                    self.dt,
                 )
 
-                # A(dt/2) O(dt) A(dt/2): drift, exact OU thermostat, drift.
+                # R(dt/2) O(dt) R(dt/2). The velocity left after O is the
+                # physical half-step velocity retained by LFMiddle.
                 _drift(systems.pos, systems.vel, 0.5 * self.dt)
                 langevin(systems.vel, self.langevin_damping, self.vcoeff)
                 _drift(systems.pos, systems.vel, 0.5 * self.dt)
 
-                # Refresh F(x[t+dt]) in place, then B(dt/2).
+                # Refresh F(x[t+dt]) in place for the next full V update.
                 pot = self.forces.compute(
                     systems.pos, systems.box, systems.forces
-                )
-                _kick(
-                    systems.vel,
-                    systems.forces,
-                    self.masses,
-                    0.5 * self.dt,
                 )
             else:
                 # Canonical velocity Verlet: B(dt/2) A(dt) B(dt/2).
