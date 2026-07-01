@@ -1,6 +1,6 @@
 import torch
 import numpy as np
-from torchmd.integrator import kinetic_energy, Integrator
+from torchmd.integrator import BOLTZMAN, TIMEFACTOR, kinetic_energy, Integrator
 from torchmd.systems import System
 
 
@@ -236,6 +236,52 @@ def test_integrator_step():
     # Check that multiple steps return final state
     assert Ekin_multi.shape == (nreplicas,)
     assert T_multi.shape == (nreplicas,)
+
+
+def test_langevin_step_uses_lfmiddle(monkeypatch):
+    system = System(1, 1, torch.float64, "cpu")
+    system.set_masses(torch.tensor([2.0], dtype=torch.float64))
+    system.pos.fill_(1.0)
+    system.vel.fill_(0.25)
+    system.forces.fill_(0.4)
+
+    class ConstantForces:
+        def compute(self, pos, box, forces):
+            forces.fill_(0.4)
+            return np.array([3.0])
+
+    monkeypatch.setattr(torch, "randn_like", lambda value: torch.ones_like(value))
+    timestep_fs = 4.0
+    gamma_ps = 1.0
+    temperature = 350.0
+    integrator = Integrator(
+        system,
+        ConstantForces(),
+        timestep_fs,
+        "cpu",
+        gamma=gamma_ps,
+        T=temperature,
+    )
+
+    dt = timestep_fs / TIMEFACTOR
+    damping = np.exp(-gamma_ps * timestep_fs / 1000.0)
+    noise = np.sqrt((1.0 - damping**2) * BOLTZMAN * temperature / 2.0)
+    half_kicked_vel = 0.25 + 0.5 * dt * 0.4 / 2.0
+    expected_pos = 1.0 + 0.5 * dt * half_kicked_vel
+    thermostatted_vel = damping * half_kicked_vel + noise
+    expected_pos += 0.5 * dt * thermostatted_vel
+    # LFMiddle retains the post-thermostat half-step velocity. Unlike the
+    # previous BAOAB state convention, there is no final force half-kick.
+    expected_vel = thermostatted_vel
+
+    integrator.step()
+
+    torch.testing.assert_close(
+        system.pos, torch.full_like(system.pos, expected_pos)
+    )
+    torch.testing.assert_close(
+        system.vel, torch.full_like(system.vel, expected_vel)
+    )
 
 
 def test_integrator_with_batches():
