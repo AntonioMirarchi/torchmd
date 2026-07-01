@@ -1,35 +1,38 @@
-from scipy import constants as const
 import torch
-import numpy as np
-from math import pi
+
 
 class NNPForces:
-    """MLIP-only force provider aligned with the `Forces.compute` contract.
+    """MLIP-only force provider aligned with the ``Forces.compute`` contract.
+
+    The external calculator owns differentiation.  In particular,
+    ``CompileExternal`` evaluates a scalar energy and returns ``-dE/dx``.  The
+    returned energy and force tensors are intentionally detached so that an MD
+    step does not retain the model's autograd graph.
 
     Behavior
     --------
     * calculateForces=False:
         - Do NOT modify the `forces` buffer (no zeroing, no overwrite).
-        - Still evaluates the MLIP once to obtain energies/curl outputs.
+        - Still evaluates the MLIP once to obtain energies.
 
     * calculateForces=True:
-        - Forces are taken from the MLIP vector output `vec` (for both conservative and non-conservative).
-        - If the MLIP does not return `vec` (empty), this raises.
+        - Forces are copied from the external calculator's force output.
+        - If the external calculator does not return forces, this raises.
 
     Returns
     -------
     Matches Forces.compute:
       - pot: np.ndarray of shape (nsystems,)
       - forces: modified in-place buffer
-      - curl: np.ndarray of shape (nsystems, natoms, 3) if computed, else None
     """
 
-    def __init__(self, 
-                parameters, 
-                external=None,
-                calculateForces=True, # (need explicit_forces false) and the pos to requires_grad to True
-                explicit_forces=None, # This means that the external MLIP is expected to return forces
-):
+    def __init__(
+        self,
+        parameters,
+        external=None,
+        calculateForces=True,
+        explicit_forces=True,
+    ):
         assert external is not None, (
             "An external MLIP must be provided for NNPForces. "
             "Otherwise use the standard Forces class."
@@ -38,6 +41,12 @@ class NNPForces:
         self.natoms = len(parameters.masses)
         self.external = external
         self.calculateForces = calculateForces
+        if calculateForces and not explicit_forces:
+            raise ValueError(
+                "NNPForces expects the external calculator to return forces. "
+                "For CompileExternal, use explicit_forces=True: the calculator "
+                "computes -dE/dx internally."
+            )
         self.explicit_forces = explicit_forces
 
     def compute(
@@ -47,49 +56,36 @@ class NNPForces:
         forces,
         toNumpy=True,
     ):
-        if self.calculateForces:
-            if not self.explicit_forces and not pos.requires_grad:
-                raise RuntimeError(
-                    "The positions passed don't require gradients. Please use pos.detach().requires_grad_(True) before passing."
-                )
-        else:
-            self.explicit_forces = False
         nsystems = pos.shape[0]
 
-        pot = torch.zeros(nsystems, device=pos.device, dtype=pos.dtype)
-
-        ext_ene, ext_force = self.external.calculate(pos, box=None) #box=box)
-        is_conservative = not self.external.model.non_conservative
-
-        if is_conservative:
-            # ext_ene is energy per system (shape: [nsystems] or [nsystems, 1])
-            pot[:] = ext_ene.reshape(-1)
-            
-            if not self.explicit_forces and self.calculateForces:
-                # Compute forces via autograd if not explicitly provided by the MLIP.
-                # This is only valid for conservative models.
-                ext_force = -torch.autograd.grad(pot.sum(), pos, retain_graph=True)[0]
-
-        
-        # MLIP forces must come from vec in the MLIP-only setup.
-        if ext_force is None or (hasattr(ext_force, "numel") and ext_force.numel() == 0):
+        # Periodic boxes are currently disabled by run.py. Keep the explicit
+        # argument here so this adapter remains correct when they are enabled.
+        ext_ene, ext_force = self.external.calculate(pos, box=box)
+        pot = ext_ene.reshape(-1).to(device=pos.device, dtype=pos.dtype)
+        if pot.numel() != nsystems:
             raise RuntimeError(
-                "MLIP did not return forces (empty `vec`) but calculateForces=True. "
-                "Enable force output in the MLIP or set calculateForces=False."
+                f"MLIP returned {pot.numel()} energies for {nsystems} systems."
             )
-        if ext_force.shape != forces.shape:
-            raise RuntimeError(
-                f"MLIP forces shape {tuple(ext_force.shape)} does not match "
-                f"forces buffer shape {tuple(forces.shape)}."
+
+        if self.calculateForces:
+            if ext_force is None or ext_force.numel() == 0:
+                raise RuntimeError(
+                    "The external MLIP calculator did not return forces."
+                )
+            if ext_force.shape != forces.shape:
+                raise RuntimeError(
+                    f"MLIP forces shape {tuple(ext_force.shape)} does not match "
+                    f"forces buffer shape {tuple(forces.shape)}."
+                )
+
+            # The integrator owns this persistent buffer. Do not attach the
+            # calculator's autograd graph to it.
+            forces.copy_(
+                ext_force.detach().to(device=forces.device, dtype=forces.dtype)
             )
-         
-        # Update the forces buffer in-place with the MLIP forces.   
-        forces.zero_()
-        forces[:] = ext_force
 
         # Return energies (and optional details) only.
         if toNumpy:
-            pot_np = pot.detach().cpu().numpy()
-            return pot_np
+            return pot.detach().cpu().numpy()
 
         return pot
