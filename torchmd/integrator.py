@@ -1,8 +1,10 @@
 import numpy as np
 import torch
 
+# Internal units are Angstrom, kcal/mol, atomic mass units, and TIMEFACTOR fs.
+# With these units F / m is acceleration in Angstrom / internal_time**2.
 TIMEFACTOR = 48.88821
-BOLTZMAN = 0.001987191
+BOLTZMAN = 0.001987191  # kcal mol^-1 K^-1
 
 
 def kinetic_energy(masses, vel, batch=None):
@@ -58,29 +60,49 @@ def kinetic_to_temp(Ekin, natoms):
     return 2.0 / (3.0 * natoms * BOLTZMAN) * Ekin
 
 
-def _first_VV(pos, vel, force, mass, dt):
-    accel = force / mass
-    pos += vel * dt + 0.5 * accel * dt * dt
-    vel += 0.5 * dt * accel
+def _kick(vel, force, mass, dt):
+    """Advance velocities by ``dt`` using the current force (B operator)."""
+    vel.add_(force / mass, alpha=dt)
 
 
-def _second_VV(vel, force, mass, dt):
-    accel = force / mass
-    vel += 0.5 * dt * accel
+def _drift(pos, vel, dt):
+    """Advance positions by ``dt`` using the current velocity (A operator)."""
+    pos.add_(vel, alpha=dt)
 
 
-def langevin(vel, gamma, coeff, dt, device):
-    csi = torch.randn_like(vel, device=device) * coeff
-    vel += -gamma * vel * dt + csi
+def langevin(vel, damping, noise_scale):
+    """Apply the exact Ornstein--Uhlenbeck velocity update in place."""
+    vel.mul_(damping).add_(torch.randn_like(vel) * noise_scale)
 
 
 PICOSEC2TIMEU = 1000.0 / TIMEFACTOR
 
 
 class Integrator:
+    """Velocity-Verlet NVE and BAOAB (Langevin-middle) NVT integrator.
+
+    ``systems.forces`` must contain the force at ``systems.pos`` on entry to
+    :meth:`step`. After every iteration it contains the force at the updated
+    positions. Velocities are stored at integer time, not at a staggered
+    half-step.
+
+    NVE applies ``B(dt/2) A(dt) B(dt/2)``. NVT applies the symmetric
+    Langevin-middle/BAOAB splitting
+    ``B(dt/2) A(dt/2) O(dt) A(dt/2) B(dt/2)``.
+    """
+
     def __init__(
         self, systems, forces, timestep, device, gamma=None, T=None, batch=None,
     ):
+        if timestep <= 0:
+            raise ValueError(f"timestep must be positive, got {timestep}")
+        if (gamma is None) != (T is None):
+            raise ValueError("gamma and T must either both be set or both be None")
+        if gamma is not None and gamma < 0:
+            raise ValueError(f"gamma must be non-negative, got {gamma}")
+        if T is not None and T < 0:
+            raise ValueError(f"T must be non-negative, got {T}")
+
         self.dt = timestep / TIMEFACTOR
         self.systems = systems
         self.forces = forces
@@ -92,36 +114,85 @@ class Integrator:
         if torch.any(systems.masses != 0):
             self.masses = systems.masses
         else:
-            self.masses = self.forces.par.masses # alrady torch.tensor, just ensure dtype and device
-            self.masses = self.masses.detach().clone().to(device=device, dtype=systems.pos.dtype)
+            # Parameters already stores a tensor; normalize device, dtype, shape.
+            self.masses = self.forces.par.masses
+            self.masses = self.masses.detach().clone().to(
+                device=device, dtype=systems.pos.dtype
+            )
             self.masses = self.masses.view(-1, 1)
 
+        if torch.any(self.masses <= 0):
+            raise ValueError("All atom masses must be positive")
+
         if T is not None and gamma is not None:
+            # Exact OU solution: v' = c*v + sqrt((1-c^2) kT/m) R.
+            self.langevin_damping = float(np.exp(-gamma * self.dt))
             self.vcoeff = torch.sqrt(
-                2.0 * gamma / self.masses * BOLTZMAN * T * self.dt
-            ).to(device)
+                (1.0 - self.langevin_damping**2)
+                * BOLTZMAN
+                * T
+                / self.masses
+            ).to(device=device, dtype=systems.vel.dtype)
         self.batch = batch
         if batch is not None:
             # number of atoms per batch
             self.natoms = torch.bincount(batch).cpu().numpy()
         else:
             self.natoms = len(self.masses)
-        
-        self.curl_storage = []
 
     def step(self, niter=1):
+        if niter < 1:
+            raise ValueError(f"niter must be at least 1, got {niter}")
         systems = self.systems
 
         for _ in range(niter):
-            _first_VV(systems.pos, systems.vel, systems.forces, self.masses, self.dt)
-            # system forces are updated in-place
-            pot = self.forces.compute(systems.pos, systems.box, systems.forces)
-            
             if self.gamma is not None and self.T is not None:
-                langevin(systems.vel, self.gamma, self.vcoeff, self.dt, self.device)
-            _second_VV(systems.vel, systems.forces, self.masses, self.dt)
+                # B(dt/2): first force half-kick.
+                _kick(
+                    systems.vel,
+                    systems.forces,
+                    self.masses,
+                    0.5 * self.dt,
+                )
+
+                # A(dt/2) O(dt) A(dt/2): drift, exact OU thermostat, drift.
+                _drift(systems.pos, systems.vel, 0.5 * self.dt)
+                langevin(systems.vel, self.langevin_damping, self.vcoeff)
+                _drift(systems.pos, systems.vel, 0.5 * self.dt)
+
+                # Refresh F(x[t+dt]) in place, then B(dt/2).
+                pot = self.forces.compute(
+                    systems.pos, systems.box, systems.forces
+                )
+                _kick(
+                    systems.vel,
+                    systems.forces,
+                    self.masses,
+                    0.5 * self.dt,
+                )
+            else:
+                # Canonical velocity Verlet: B(dt/2) A(dt) B(dt/2).
+                _kick(
+                    systems.vel,
+                    systems.forces,
+                    self.masses,
+                    0.5 * self.dt,
+                )
+                _drift(systems.pos, systems.vel, self.dt)
+                pot = self.forces.compute(
+                    systems.pos, systems.box, systems.forces
+                )
+                _kick(
+                    systems.vel,
+                    systems.forces,
+                    self.masses,
+                    0.5 * self.dt,
+                )
 
         ke_result = kinetic_energy(self.masses, systems.vel, self.batch)
-        Ekin = ke_result.flatten().cpu().numpy()
-        T = kinetic_to_temp(Ekin, self.natoms)
+        Ekin = ke_result.detach().flatten().cpu().numpy()
+        if self.batch is None:
+            T = 2.0 * Ekin / (self.systems.dof * BOLTZMAN)
+        else:
+            T = kinetic_to_temp(Ekin, self.natoms)
         return Ekin, pot, T
