@@ -61,19 +61,27 @@ def get_args(arguments=None):
     parser.add_argument("--npz_file", default=None, type=str, help="Input file.npz with coord and z")
     parser.add_argument('--save-final-coords', default=False, type=bool, help='If True, save final coordinates to a pdb file')
     # new args
-    parser.add_argument('--explicit-forces', default=False, help='If True, it expects the potentials to return forces directly')
-    parser.add_argument('--calculate-forces', default=False, help='If True, compute the forces as derivative of the energy via autograd (explicit_forces needs to be True)')
+    parser.add_argument('--explicit-forces', default=True, action=argparse.BooleanOptionalAction, help='External calculator returns forces (required for NNP MD)')
+    parser.add_argument('--calculate-forces', default=True, action=argparse.BooleanOptionalAction, help='Populate the force buffer (required for MD)')
     parser.add_argument("--external-file", type=str, default=None, help="Override external.file")
     parser.add_argument("--save-xtc", default=False, action="store_true", help="Whether to save the trajectory also in xtc format (in addition to npy and xyz)")
     parser.add_argument("--velocities-file", type=str, default=None, help="File from which to load initial velocities (.npy), otherwise sampled from MB distribution")
-    parser.add_argument("--to-constraint-harmonic", type=str, default=None, help="Path to a numpy array of atom indices for harmonic positional restraints")
-    parser.add_argument("--k-harmonic", type=float, default=1.0, help="Harmonic restraint force constant in kcal/mol/A^2")
-    parser.add_argument("--to-constraint-flat-bottom-box", nargs=3, type=float, default=None, help="Flat-bottom box full widths in Angstrom")
-    parser.add_argument("--k-flat-bottom", type=float, default=0.1, help="Flat-bottom restraint force constant in kcal/mol/A^2")
-    parser.add_argument("--pocket-idxs", type=str, default=None, help="Path to a numpy array of pocket atom indices for the flat-bottom restraint")
-    parser.add_argument("--c7-index", type=int, default=None, help="Ligand C7 atom index for the flat-bottom restraint")
     parser.add_argument("--charge", type=str, default=None, help="Total molecular charge passed to the external NNP. Can be a scalar or a .npy file with one value or one value per replica.")
     args = parser.parse_args(args=arguments)
+
+    # LoadFromFile accepts arbitrary YAML keys for backward compatibility.
+    # Increased NOH masses are no longer supported, so do not silently retain
+    # or reproduce this obsolete setting in the normalized input file.
+    for deprecated_mass_arg in ("useIncreasedMasses", "use_increased_masses"):
+        if hasattr(args, deprecated_mass_arg):
+            warnings.warn(
+                f"`{deprecated_mass_arg}` is deprecated and ignored; TorchMD "
+                "uses the masses provided by the topology.",
+                FutureWarning,
+                stacklevel=2,
+            )
+            delattr(args, deprecated_mass_arg)
+
     os.makedirs(args.log_dir, exist_ok=True)
     save_argparse(args, os.path.join(args.log_dir, "input.yaml"), exclude="conf")
     # fmt: on
@@ -137,17 +145,6 @@ def setup(args, batch_comp=False):
 
     external = None
     if args.external is not None:
-        needs_restraints = any(
-            value is not None
-            for value in (
-                args.to_constraint_harmonic,
-                args.to_constraint_flat_bottom_box,
-                args.pocket_idxs,
-                args.c7_index,
-            )
-        )
-        if needs_restraints:
-            args.external["module"] = "torchmd.restraint_external"
         externalmodule = importlib.import_module(args.external["module"])
         if batch_comp:
             embeddings = torch.tensor(mol.embedding).repeat(args.replicas, 1)
@@ -162,9 +159,7 @@ def setup(args, batch_comp=False):
                 )
         else:
             embeddings = torch.tensor([periodictable[el].number for el in mol.element]).repeat(args.replicas, 1)
-            print(f"emb.shape before repeat: {embeddings.shape}")
-            print("Using embeddings from the molecule:", embeddings)
-
+        
         charge = None
         if args.charge is not None:
             try:
@@ -183,21 +178,17 @@ def setup(args, batch_comp=False):
             for key, value in args.external.items()
             if key not in ["module", "file", "embeddings"]
         }
-        args.external["to_constraint_harmonic"] = args.to_constraint_harmonic
-        args.external["k_harmonic"] = args.k_harmonic
-        args.external["to_constraint_flat_bottom_box"] = args.to_constraint_flat_bottom_box
-        args.external["k_flat_bottom"] = args.k_flat_bottom
-        args.external["pocket_idxs"] = args.pocket_idxs
-        args.external["c7_index"] = args.c7_index
+
         args.external["charge"] = charge
         # nAtoms is used to define the compile setting
         # If we do not consider the nReplicas in the nAtoms, then we are under-estimating the computational cost of the system,
         # which can lead to OOM errors because the external module might allocate tensors of size (nAtoms,) or (nAtoms, 3) without considering replicas
         external = externalmodule.CompileExternal(
-            file, embeddings, device=device, nAtoms=mol.numAtoms * mol.numFrames , **args.external
+            file, embeddings, device=device, nAtoms=mol.numAtoms * args.replicas,
+            **args.external
         )
     system = System(mol.numAtoms, args.replicas, precision, device)
-    system.set_positions(mol.coords)
+    system.set_positions(mol.coords[:, :, :args.replicas])
     warnings.warn(
         "Periodic box handling is disabled in this repository. run.py will ignore input box data and the external model/compiler will always receive box=None.",
         stacklevel=2,
@@ -225,11 +216,19 @@ def setup(args, batch_comp=False):
         p_tot = torch.linalg.norm(p, dim=-1)  # (replicas, )
         print(f"Total momentum after removing COM velocity: {p_tot}") # should be close to zero
     
+    if not args.explicit_forces or not args.calculate_forces:
+        warnings.warn(
+            "NNP molecular dynamics requires the external calculator to return "
+            "forces and requires the force buffer to be populated. Overriding "
+            "explicit_forces/calculate_forces to True. CompileExternal still "
+            "obtains these forces as -dE/dx from the scalar energy.",
+            stacklevel=2,
+        )
     forces = NNPForces(
             parameters,
             external=external,
-            explicit_forces=args.explicit_forces,
-            calculateForces=args.calculate_forces,
+            explicit_forces=True,
+            calculateForces=True,
         )
     return mol, system, forces
 
